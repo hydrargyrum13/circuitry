@@ -53,6 +53,7 @@ canvas{touch-action:none}
     <button class="place" data-type="V">V</button>
     <button class="place" data-type="R">R</button>
     <button class="place" data-type="C">C</button>
+    <button class="place" data-type="D">D</button>
     <button class="place" data-type="SW">SW</button>
     <button class="place" data-type="NPN">NPN</button>
     <button class="place" data-type="PNP">PNP</button>
@@ -106,12 +107,13 @@ const defaults={
  V:{value:5,unit:'V'},
  R:{value:1000,unit:'Ω'},
  C:{value:100,unit:'µF'},
+ D:{value:0.7,unit:'V'},
  SW:{closed:false},
  NPN:{beta:100},
  PNP:{beta:100},
  GND:{}
 };
-const names={V:'DC Source',R:'Resistor',C:'Capacitor',SW:'Switch',NPN:'NPN Transistor',PNP:'PNP Transistor',GND:'Ground'};
+const names={V:'DC Source',R:'Resistor',C:'Capacitor',D:'Diode',SW:'Switch',NPN:'NPN Transistor',PNP:'PNP Transistor',GND:'Ground'};
 function clone(v){return JSON.parse(JSON.stringify(v))}
 function snap(v){return Math.round(v/GRID)*GRID}
 function nodeKey(x,y){return `${Math.round(x/GRID)},${Math.round(y/GRID)}`}
@@ -185,7 +187,7 @@ function terminals(p){
     {name:'c',x:GRID,y:-GRID},
     {name:'e',x:GRID,y:GRID}
   ];
-  else local=[{name:'a',x:-2*GRID,y:0},{name:'b',x:2*GRID,y:0}];
+  else local=[{name:'a',x:-2*GRID,y:0},{name:p.type==='D'?'k':'b',x:2*GRID,y:0}];
   return local.map(t=>{
     let {x,y}=t;
     for(let i=0;i<p.rot;i++)[x,y]=[-y,x];
@@ -343,6 +345,7 @@ function refreshInspector(){
     html+=`<div class="row"><span>Unit</span><select id="propUnit"><option>F</option><option>mF</option><option>µF</option><option>nF</option></select></div>`;
   }
   if(p.type==='NPN'||p.type==='PNP')html+=`<div class="row"><span>β</span><input id="propVal" type="number" step="any" value="${p.beta}"></div>`;
+  if(p.type==='D')html+=`<div class="row"><span>Forward drop (V)</span><input id="propVal" type="number" min="0" step="0.05" value="${p.value}"></div><div style="color:#91a9b9;margin:6px 0">A ? K ? bar marks cathode<br>Constant-drop model ? 1 ? on resistance</div>`;
   if(p.type==='SW')html+=`<div class="row"><span>State</span><button id="toggleSw">${p.closed?'Closed':'Open'}</button></div>`;
   html+=`<hr style="border:0;border-top:1px solid #000;margin:8px 0">`;
   for(const [k,v] of Object.entries(p.terminalV||{}))html+=`<div class="row"><span>${k.toUpperCase()} V</span><span>${eng(v,'V')}</span></div>`;
@@ -352,7 +355,7 @@ function refreshInspector(){
   const inp=document.getElementById('propVal'),unit=document.getElementById('propUnit'),sw=document.getElementById('toggleSw');
   if(inp)inp.oninput=()=>{
     const v=Number(inp.value);if(!Number.isFinite(v))return;
-    if(['V','R','C'].includes(p.type))p.value=v;else p.beta=Math.max(1,v);
+    if(p.type==='D')p.value=Math.max(0,v);else if(['V','R','C'].includes(p.type))p.value=v;else p.beta=Math.max(1,v);
   };
   if(unit){unit.value=p.unit;unit.onchange=()=>p.unit=unit.value}
   if(sw)sw.onclick=()=>{p.closed=!p.closed;refreshInspector()}
@@ -434,6 +437,12 @@ function simulate(dt){
       if(p.type==='R'){
         const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
         addG(A,a,b,1/Math.max(1e-12,valueSI(p)));
+      }else if(p.type==='D'){
+        const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
+        // Piecewise-linear constant-drop diode, with 1 ohm forward resistance.
+        const on=nV(a)-nV(b)>p.value;
+        addG(A,a,b,on?1:1e-12);
+        if(on)addI(z,a,b,-p.value);
       }else if(p.type==='SW'&&!p.closed){
         const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
         addG(A,a,b,1e-12);
@@ -490,6 +499,10 @@ function simulate(dt){
       p.i=I;p.termI.a=I;p.termI.b=-I;p.capV=p.terminalV.a-p.terminalV.b;
     }else if(p.type==='V'){
       const k=vsrcs.indexOf(p),I=x[N+k]||0;p.i=I;p.termI.a=I;p.termI.b=-I;
+    }else if(p.type==='D'){
+      const v=p.terminalV.a-p.terminalV.k;
+      const I=v>p.value?v-p.value:v*1e-12;
+      p.i=I;p.termI.a=I;p.termI.k=-I;
     }else if(p.type==='SW'){
       p.i=0;p.termI.a=0;p.termI.b=0;
     }else if(p.type==='GND'){
@@ -559,6 +572,10 @@ function drawPart(p){
     line(-48,0,-24,0,2);
     ctx.beginPath();ctx.moveTo(-24,0);ctx.lineTo(-18,-8);ctx.lineTo(-10,8);ctx.lineTo(-2,-8);ctx.lineTo(6,8);ctx.lineTo(14,-8);ctx.lineTo(22,8);ctx.lineTo(24,0);ctx.stroke();
     line(24,0,48,0,2);
+  }else if(p.type==='D'){
+    line(-48,0,-13,0,2);line(13,0,48,0,2);
+    ctx.beginPath();ctx.moveTo(-13,-14);ctx.lineTo(13,0);ctx.lineTo(-13,14);ctx.closePath();ctx.stroke();
+    line(13,-14,13,14,2);
   }else if(p.type==='C'){
     line(-48,0,-8,0,2);line(-8,-14,-8,14,2);line(8,-14,8,14,2);line(8,0,48,0,2);
   }else if(p.type==='V'){
@@ -589,6 +606,7 @@ function drawPart(p){
   if(p.type==='V')label=p.value+' V';
   if(p.type==='R')label=p.value+' '+p.unit;
   if(p.type==='C')label=p.value+' '+p.unit;
+  if(p.type==='D')label='D ? '+p.value+' V';
   if(p.type==='SW')label=p.closed?'closed':'open';
   if(p.type==='NPN'||p.type==='PNP')label=p.type;
   if(label){
@@ -623,7 +641,7 @@ function drawElectronFlow(w){
   drawElectronFlowSegment(nodeXY(w.a),nodeXY(w.b),w.approxI||0);
 }
 function drawPartElectronFlow(p){
-  if(!['V','R','SW'].includes(p.type))return;
+  if(!['V','R','SW','D'].includes(p.type))return;
   const ts=terminals(p),center={x:p.x,y:p.y};
   drawElectronFlowSegment({x:ts[0].x,y:ts[0].y},center,p.i||0);
   drawElectronFlowSegment(center,{x:ts[1].x,y:ts[1].y},p.i||0);
