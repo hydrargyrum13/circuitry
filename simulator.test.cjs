@@ -97,7 +97,7 @@ test('NOT gate works with actual canvas terminals and all transistor rotations',
 test('source long plate is on its positive a terminal side',()=>{
   const segments=[];
   const ctx=new Proxy({measureText:()=>({width:20})},{get:(obj,k)=>obj[k]??(()=>{})});
-  const c={ctx,selected:null,hovered:null,PART_SCALE:40/24,lineColor:'',terminals:()=>[{name:'a'},{name:'b'}],componentGradient:()=>'',terminalVoltage:()=>0,voltageColor:()=>'',dot:()=>{},line:(...coords)=>segments.push(coords)};
+  const c={ctx,isSelected:()=>false,selected:null,hovered:null,PART_SCALE:40/24,lineColor:'',terminals:()=>[{name:'a'},{name:'b'}],componentGradient:()=>'',terminalVoltage:()=>0,voltageColor:()=>'',dot:()=>{},line:(...coords)=>segments.push(coords)};
   vm.createContext(c);vm.runInContext(script.slice(script.indexOf('function drawPart(p)'),script.indexOf('function drawElectronFlowSegment')),c);
   c.drawPart({type:'V',x:0,y:0,rot:0,value:5});
   const plates=segments.filter(([x1,y1,x2,y2])=>x1===x2&&y1!==y2);

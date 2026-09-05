@@ -41,12 +41,24 @@ canvas{touch-action:none}
 #hint{max-width:calc(100% - 40px);line-height:1.6}
 @media(max-width:640px){#status,.spacer{display:none}#inspector{min-width:170px;right:8px;top:8px}#hud{max-width:42%;line-height:1.5}}
 @media(prefers-reduced-motion:reduce){button{transition:none}}
+#app{grid-template-rows:auto 1fr}
+#bar{flex-wrap:wrap}
+#inspector{max-width:260px}
+#chipLibrary,#chipName{font:12px Arial;background:#17232d;color:#dce8ef;border:1px solid #526575;border-radius:5px;padding:6px;max-width:200px}
+#chipDialog{color:#e7f0f7;background:#111b24;border:1px solid #526575;border-radius:10px;padding:22px;max-width:320px}
+#chipDialog::backdrop{background:#0009}
+#chipDialog h2{margin-top:0;font-size:18px}
+#chipDialog label{display:block;margin:14px 0}
+#chipDialog p{font-size:12px;line-height:1.5;color:#91a9b9}
 </style>
 </head>
 <body>
 <div id="app">
   <div id="bar">
     <button id="toolSelect" class="active">Select</button>
+    <select id="chipLibrary" aria-label="Custom Chips"></select>
+    <button id="saveChipBtn" disabled>Save Chip</button>
+    <button id="ungroupBtn" disabled>Ungroup</button>
     <button id="toolWire" title="Wire (Space)" aria-keyshortcuts="Space">Wire [Space]</button>
     <button id="rotateBtn" title="Rotate selected component 90? clockwise (R)" disabled>? Rotate</button>
     <div class="sep"></div>
@@ -72,10 +84,16 @@ canvas{touch-action:none}
     <canvas id="cv"></canvas>
     <div id="hud">Grid-native schematic. Every grid point is a junction node.</div>
     <div id="inspector"></div>
-    <div id="hint">Wheel zoom · middle drag pan · Space wire · R rotate · Del delete</div>
+    <div id="hint">Drag empty space to select | Shift+click to add/remove | Drag selection to move | Space wire | R rotate | Del delete | Middle drag pan</div>
   </div>
 </div>
 
+<dialog id="chipDialog" aria-labelledby="chipDialogTitle"><form id="chipForm">
+<h2 id="chipDialogTitle">Save custom chip</h2>
+<p>Save the selected components and wires as a reusable group in this browser.</p>
+<label>Chip name <input id="chipName" maxlength="48" required autocomplete="off"></label>
+<button type="button" id="chipCancel">Cancel</button> <button type="submit">Save Chip</button>
+</form></dialog>
 <script>
 (() => {
 const GRID=40;
@@ -98,9 +116,10 @@ function resize(){
   ctx.setTransform(dpr,0,0,dpr,0,0);
 }
 addEventListener('resize',resize);resize();
+if(typeof ResizeObserver!=='undefined')new ResizeObserver(resize).observe(stage);
 
 const parts=[],wires=[];
-let nextId=1,tool='select',placeType=null,selected=null,dragging=null,dragOff={x:0,y:0},wireStart=null;
+let nextId=1,tool='select',placeType=null,selected=null,dragging=null,wireStart=null;
 let running=true,showElectrons=true,simTime=0,lastMouse={x:0,y:0},lastT=performance.now();
 let voltageByNode=new Map(),voltageMax=1,lineColor='#d7e6ee';
 
@@ -134,8 +153,9 @@ function componentGradient(p,ts){
 
 function setTool(newTool,pt=null){
   finishGesture();
-  tool=newTool;placeType=pt;wireStart=null;
-  hud.textContent=newTool==='wire'?'Click two grid nodes to connect them.':newTool==='place'?`Click to place ${names[pt].toLowerCase()}.`:'Every grid point is a junction node.';
+  tool=newTool;placeType=pt;wireStart=null;chipTemplate=null;
+  if(newTool!=='chip')document.getElementById('chipLibrary').value='';
+  hud.textContent=newTool==='wire'?'Click two grid nodes to connect them.':newTool==='place'?`Click to place ${names[pt].toLowerCase()}.`:'Drag empty space to select. Shift+click adds or removes items.';
   updateCursor();
   document.querySelectorAll('#bar button').forEach(b=>b.classList.remove('active'));
   if(newTool==='select')document.getElementById('toolSelect').classList.add('active');
@@ -151,10 +171,13 @@ document.getElementById('toolSelect').onclick=()=>setTool('select');
 document.getElementById('toolWire').onclick=()=>setTool('wire');
 document.getElementById('rotateBtn').onclick=rotateSelected;
 function rotateSelected(){
-  if(selected?.kind!=='part')return;
+  if(!selection.size)return;
   finishGesture();
-  const p=getPart(selected.id);
-  if(p){p.rot=(p.rot+1)%4;refreshInspector()}
+  const b=boundsFor(selectionObjects()),cx=snap((b.x+b.right)/2),cy=snap((b.y+b.bottom)/2);
+  const single=selectionObjects();
+  const center=single.length===1&&single[0].type?single[0]:{x:cx,y:cy};
+  transformSelection(captureSelection(),q=>({x:center.x-(q.y-center.y),y:center.y+(q.x-center.x)}),1);
+  syncSelection();
 }
 document.querySelectorAll('.place').forEach(btn=>btn.onclick=()=>setTool('place',btn.dataset.type));
 document.getElementById('electronBtn').onclick=()=>{
@@ -168,13 +191,13 @@ document.getElementById('runBtn').onclick=()=>{
 };
 document.getElementById('clearBtn').onclick=()=>{
   finishGesture();voltageByNode.clear();
-  parts.length=0;wires.length=0;selected=null;wireStart=null;simTime=0;refreshInspector();updateStatus();
+  parts.length=0;wires.length=0;chipGroups.length=0;selection.clear();selected=null;wireStart=null;simTime=0;refreshInspector();updateStatus();
 };
 
 function addPart(type,x,y){
   const p={id:nextId++,type,x:snap(x),y:snap(y),rot:0,...clone(defaults[type]),terminalV:{},termI:{},i:0,capV:0};
   parts.push(p);
-  selected={kind:'part',id:p.id};
+  selectOnly(p);
   refreshInspector();updateStatus();
   setTool('select'); // auto return to select
 }
@@ -228,22 +251,29 @@ function hitWire(x,y){
 let panning=null,gesture=null,hovered=null;
 function updateCursor(){cv.style.cursor=panning||dragging?'grabbing':tool==='select'?(hovered?'grab':'default'):'crosshair'}
 function finishGesture(cancel=false){
-  if(dragging&&gesture){
-    dragging.x=cancel?gesture.x:snap(dragging.x);
-    dragging.y=cancel?gesture.y:snap(dragging.y);
+  if(dragging&&gesture&&cancel)transformSelection(gesture.snapshot,p=>p);
+  if(marquee){
+    if(cancel){selection.clear();for(const id of marquee.before)selection.add(id)}
+    else{
+      const b={x:Math.min(marquee.x,marquee.endX),y:Math.min(marquee.y,marquee.endY),right:Math.max(marquee.x,marquee.endX),bottom:Math.max(marquee.y,marquee.endY)};
+      if(!marquee.additive)selection.clear();
+      if(b.right-b.x>3/viewScale||b.bottom-b.y>3/viewScale){
+        for(const p of parts)if(inside(p,b))selection.add(p.id);
+        for(const w of wires)if(inside(nodeXY(w.a),b)&&inside(nodeXY(w.b),b))selection.add(w.id);
+      }
+    }
+    marquee=null;syncSelection();
   }
-  dragging=null;panning=null;gesture=null;
-  updateCursor();
+  dragging=null;panning=null;gesture=null;updateCursor();
 }
 cv.addEventListener('pointerdown',e=>{
   if(e.button!==0&&e.button!==1)return;
   const m=mousePos(e),world=worldPos(m);lastMouse=world;
   cv.setPointerCapture(e.pointerId);
-  if(e.button===1){
-    panning={x:m.x,y:m.y,viewX,viewY};e.preventDefault();updateCursor();return;
-  }
+  if(e.button===1){panning={x:m.x,y:m.y,viewX,viewY};e.preventDefault();updateCursor();return}
   const s={x:snap(world.x),y:snap(world.y)};
   if(tool==='place'){addPart(placeType,s.x,s.y);return}
+  if(tool==='chip'&&chipTemplate){placeChip(chipTemplate,s.x,s.y);return}
   if(tool==='wire'){
     const k=nodeKey(s.x,s.y);
     if(!wireStart){wireStart=k;hud.textContent='Pick another grid node. Escape to cancel.'}
@@ -254,35 +284,42 @@ cv.addEventListener('pointerdown',e=>{
     }
     return;
   }
-  const p=hitPart(world.x,world.y);
-  if(p){
-    selected={kind:'part',id:p.id};dragging=p;
-    gesture={x:p.x,y:p.y,mouseX:m.x,mouseY:m.y,moved:false};
-    dragOff={x:world.x-p.x,y:world.y-p.y};
-    refreshInspector();updateCursor();return;
+  const object=hitPart(world.x,world.y)||hitWire(world.x,world.y);
+  const group=object?.chipId?chipGroups.find(g=>g.id===object.chipId):!object?hitChip(world.x,world.y):null;
+  const targets=group?chipObjects(group.id):object?[object]:[];
+  if(targets.length){
+    if(e.shiftKey){
+      const remove=targets.every(isSelected);for(const o of targets){if(remove)selection.delete(o.id);else selection.add(o.id)}
+      syncSelection();return;
+    }
+    if(!targets.every(isSelected)){selection.clear();for(const o of targets)selection.add(o.id);syncSelection()}
+  }else if(e.shiftKey||selection.size<2||!inside(world,boundsFor(selectionObjects()))){
+    marquee={x:world.x,y:world.y,endX:world.x,endY:world.y,additive:e.shiftKey,before:[...selection]};
+    if(!e.shiftKey){selection.clear();syncSelection()}
+    return;
   }
-  const w=hitWire(world.x,world.y);
-  selected=w?{kind:'wire',id:w.id}:null;refreshInspector();
+  if(selection.size){dragging=true;gesture={snapshot:captureSelection(),x:world.x,y:world.y,mouseX:m.x,mouseY:m.y,moved:false};updateCursor()}
 });
 cv.addEventListener('pointermove',e=>{
   const m=mousePos(e);
   if(panning){viewX=panning.viewX+m.x-panning.x;viewY=panning.viewY+m.y-panning.y;return}
   lastMouse=worldPos(m);
+  if(marquee){marquee.endX=lastMouse.x;marquee.endY=lastMouse.y;return}
   if(dragging&&gesture){
     if(Math.hypot(m.x-gesture.mouseX,m.y-gesture.mouseY)>3)gesture.moved=true;
-    if(gesture.moved){dragging.x=lastMouse.x-dragOff.x;dragging.y=lastMouse.y-dragOff.y}
+    if(gesture.moved){const dx=snap(lastMouse.x-gesture.x),dy=snap(lastMouse.y-gesture.y);transformSelection(gesture.snapshot,p=>({x:p.x+dx,y:p.y+dy}))}
   }
-  hovered=hitPart(lastMouse.x,lastMouse.y);updateCursor();
+  hovered=hitPart(lastMouse.x,lastMouse.y)||hitWire(lastMouse.x,lastMouse.y)||hitChip(lastMouse.x,lastMouse.y);updateCursor();
 });
 cv.addEventListener('pointerup',()=>finishGesture());
 cv.addEventListener('pointercancel',()=>finishGesture(true));
 cv.addEventListener('lostpointercapture',()=>finishGesture());
 cv.addEventListener('pointerleave',()=>{hovered=null;updateCursor()});
-addEventListener('blur',()=>{finishGesture(true)});
+addEventListener('blur',()=>finishGesture(true));
 stage.addEventListener('wheel',e=>{
   if(e.target!==cv)return;
   e.preventDefault();
-  if(dragging||panning)return;
+  if(dragging||panning||marquee)return;
   const m=mousePos(e),before=worldPos(m);
   const factor=Math.exp(-e.deltaY*.001);
   viewScale=Math.max(.25,Math.min(4,viewScale*factor));
@@ -296,7 +333,7 @@ stage.addEventListener('dblclick',e=>{
 });
 
 addEventListener('keydown',e=>{
-  if(e.target.matches('input,select,textarea')||e.target.isContentEditable)return;
+  if(document.getElementById('chipDialog').open||e.target.matches('input,select,textarea')||e.target.isContentEditable)return;
   if(e.ctrlKey||e.metaKey||e.altKey||e.isComposing)return;
   const componentType=componentShortcuts[e.key];
   if(componentType&&!e.shiftKey){
@@ -306,18 +343,8 @@ addEventListener('keydown',e=>{
   }
   if(e.key==='Escape'){finishGesture(true);setTool('select');return}
   if(e.code==='Space'){e.preventDefault();if(!e.repeat)setTool('wire');return}
-  if((e.key==='Delete'||e.key==='Backspace')&&selected){
-    e.preventDefault();finishGesture();
-    if(selected.kind==='part'){
-      const id=selected.id,i=parts.findIndex(p=>p.id===id);
-      if(i>=0)parts.splice(i,1);
-    }else{
-      const i=wires.findIndex(w=>w.id===selected.id);
-      if(i>=0)wires.splice(i,1);
-    }
-    selected=null;refreshInspector();updateStatus();
-  }
-  if((e.key==='r'||e.key==='R')&&selected?.kind==='part'){
+  if((e.key==='Delete'||e.key==='Backspace')&&selection.size){e.preventDefault();deleteSelection()}
+  if((e.key==='r'||e.key==='R')&&selection.size){
     e.preventDefault();if(!e.repeat)rotateSelected();
   }
 });
@@ -338,9 +365,16 @@ function updateWireReadings(w){
 }
 
 function refreshInspector(){
-  document.getElementById('rotateBtn').disabled=selected?.kind!=='part';
+  document.getElementById('rotateBtn').disabled=!selection.size;
+  document.getElementById('saveChipBtn').disabled=!parts.some(isSelected);
+  document.getElementById('ungroupBtn').disabled=!selectionObjects().some(o=>o.chipId);
   if(!selected){inspector.style.display='none';return}
   inspector.style.display='block';
+  if(selected.kind==='group'){
+    const objects=selectionObjects(),count=objects.filter(o=>o.type).length;
+    inspector.textContent=count+' components, '+(objects.length-count)+' wires selected. Drag to move, R to rotate, Delete to remove. Save Chip to reuse.';
+    return;
+  }
   if(selected.kind==='wire'){
     const w=getWire(selected.id);
     if(!w){inspector.style.display='none';return}
@@ -374,6 +408,143 @@ function refreshInspector(){
   };
   if(unit){unit.value=p.unit;unit.onchange=()=>p.unit=unit.value}
   if(sw)sw.onclick=()=>{p.closed=!p.closed;refreshInspector()}
+}
+
+const selection=new Set(),chipGroups=[];
+let marquee=null,chipTemplate=null;
+const CHIP_STORAGE='circuitry.customChips.v1';
+const chipPalette=['#8b9dff','#57c9b0','#e6aa64','#cf86d9'];
+let chipLibrary=[];
+function selectionObjects(){return [...parts,...wires].filter(o=>selection.has(o.id))}
+function isSelected(o){return selection.has(o.id)}
+function expandSelection(){
+  const groups=new Set(selectionObjects().map(o=>o.chipId).filter(Boolean));
+  for(const o of [...parts,...wires])if(groups.has(o.chipId))selection.add(o.id);
+}
+function syncSelection(){
+  expandSelection();
+  const objects=selectionObjects();
+  selected=objects.length===1?{kind:parts.includes(objects[0])?'part':'wire',id:objects[0].id}:objects.length?{kind:'group'}:null;
+  refreshInspector();
+}
+function selectOnly(o){selection.clear();if(o)selection.add(o.id);syncSelection()}
+function boundsFor(objects){
+  const points=[];
+  for(const o of objects){
+    if(o.type){
+      const wide=o.type==='NPN'||o.type==='PNP'?54:o.type==='GND'?37:88;
+      const tall=o.type==='NPN'||o.type==='PNP'?62:48;
+      points.push({x:o.x-(o.rot%2?tall:wide),y:o.y-(o.rot%2?wide:tall)},
+        {x:o.x+(o.rot%2?tall:wide),y:o.y+(o.rot%2?wide:tall)});
+    }else points.push(nodeXY(o.a),nodeXY(o.b));
+  }
+  if(!points.length)return null;
+  return {x:Math.min(...points.map(p=>p.x))-16,y:Math.min(...points.map(p=>p.y))-28,
+    right:Math.max(...points.map(p=>p.x))+16,bottom:Math.max(...points.map(p=>p.y))+16};
+}
+function inside(point,b){return b&&point.x>=b.x&&point.x<=b.right&&point.y>=b.y&&point.y<=b.bottom}
+function chipObjects(id){return [...parts,...wires].filter(o=>o.chipId===id)}
+function hitChip(x,y){return [...chipGroups].reverse().find(g=>inside({x,y},boundsFor(chipObjects(g.id))))}
+function selectedCircuit(){
+  const ps=parts.filter(isSelected),ws=wires.filter(isSelected);
+  const nodes=new Set(ps.flatMap(p=>terminals(p).map(t=>nodeKey(t.x,t.y))));
+  for(const w of ws){nodes.add(w.a);nodes.add(w.b)}
+  return {ps,ws:wires.filter(w=>isSelected(w)||(nodes.has(w.a)&&nodes.has(w.b)))};
+}
+function captureSelection(){
+  const {ps,ws}=selectedCircuit(),nodes=new Set();
+  for(const p of ps)for(const t of terminals(p))nodes.add(nodeKey(t.x,t.y));
+  for(const w of ws){nodes.add(w.a);nodes.add(w.b)}
+  return {ps:ps.map(p=>({p,x:p.x,y:p.y,rot:p.rot})),ws:wires.map(w=>({w,a:w.a,b:w.b,moveA:nodes.has(w.a),moveB:nodes.has(w.b)})).filter(w=>w.moveA||w.moveB)};
+}
+function transformSelection(snapshot,transform,rotation=0){
+  for(const item of snapshot.ps){const q=transform({x:item.x,y:item.y});item.p.x=q.x;item.p.y=q.y;item.p.rot=(item.rot+rotation+4)%4}
+  for(const item of snapshot.ws){
+    item.w.a=item.moveA?nodeKey(...Object.values(transform(nodeXY(item.a)))):item.a;
+    item.w.b=item.moveB?nodeKey(...Object.values(transform(nodeXY(item.b)))):item.b;
+  }
+}
+function pruneGroups(){for(let i=chipGroups.length-1;i>=0;i--)if(!chipObjects(chipGroups[i].id).length)chipGroups.splice(i,1)}
+function deleteSelection(){
+  finishGesture();
+  for(const list of [parts,wires])for(let i=list.length-1;i>=0;i--)if(selection.has(list[i].id))list.splice(i,1);
+  selection.clear();pruneGroups();syncSelection();updateStatus();
+}
+function ungroupSelection(){
+  for(const o of selectionObjects())delete o.chipId;
+  pruneGroups();syncSelection();hud.textContent='Chip ungrouped. Its components can now be edited separately.';
+}
+function chipConfig(p,x,y){
+  const result={type:p.type,x:p.x-x,y:p.y-y,rot:p.rot};
+  for(const key of Object.keys(defaults[p.type]))result[key]=p[key];
+  return result;
+}
+function saveChip(name){
+  const {ps,ws}=selectedCircuit();
+  if(!ps.length)return false;
+  const objects=[...ps,...ws],b=boundsFor(objects),x=snap(b.x),y=snap(b.y);
+  const offset=k=>{const p=nodeXY(k);return nodeKey(p.x-x,p.y-y)};
+  const template={name:name.trim().slice(0,48)||'Custom chip',color:chipPalette[chipLibrary.length%chipPalette.length],
+    parts:ps.map(p=>chipConfig(p,x,y)),wires:ws.map(w=>({a:offset(w.a),b:offset(w.b)}))};
+  chipLibrary.push(template);
+  const group={id:nextId++,name:template.name,color:template.color};chipGroups.push(group);
+  selection.clear();for(const o of objects){o.chipId=group.id;selection.add(o.id)}
+  pruneGroups();syncSelection();renderChipLibrary();
+  try{localStorage.setItem(CHIP_STORAGE,JSON.stringify(chipLibrary));hud.textContent='Chip saved. Choose it in Custom Chips, then click to place a copy.'}
+  catch{hud.textContent='Chip added for this session. Browser storage is unavailable; it will not survive a reload.'}
+  return true;
+}
+function placeChip(template,x,y){
+  selection.clear();
+  const group={id:nextId++,name:template.name,color:template.color};chipGroups.push(group);
+  for(const config of template.parts){
+    const p={...clone(config),id:nextId++,chipId:group.id,x:config.x+x,y:config.y+y,terminalV:{},termI:{},i:0,capV:0};
+    parts.push(p);selection.add(p.id);
+  }
+  const offset=k=>{const p=nodeXY(k);return nodeKey(p.x+x,p.y+y)};
+  for(const config of template.wires){const w={id:nextId++,chipId:group.id,a:offset(config.a),b:offset(config.b),approxI:0};wires.push(w);selection.add(w.id)}
+  setTool('select');syncSelection();updateStatus();
+}
+function validChip(t){
+  const coord=n=>Number.isFinite(n)&&Math.abs(n)<1e7&&n%GRID===0;
+  return t&&typeof t.name==='string'&&t.name.length<=48&&/^#[0-9a-f]{6}$/i.test(t.color)&&
+    Array.isArray(t.parts)&&t.parts.length>0&&t.parts.length<=1000&&t.parts.every(p=>Object.hasOwn(defaults,p.type)&&coord(p.x)&&coord(p.y)&&Number.isInteger(p.rot)&&p.rot>=0&&p.rot<4&&Object.keys(defaults[p.type]).every(k=>typeof p[k]===typeof defaults[p.type][k]&&(typeof p[k]!=='number'||Number.isFinite(p[k]))))&&
+    Array.isArray(t.wires)&&t.wires.length<=5000&&t.wires.every(w=>[w.a,w.b].every(k=>typeof k==='string'&&/^-?\d{1,6},-?\d{1,6}$/.test(k)));
+}
+function renderChipLibrary(){
+  const menu=document.getElementById('chipLibrary');menu.replaceChildren();
+  const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent=chipLibrary.length?'Custom Chips ('+chipLibrary.length+')':'Custom Chips (empty)';menu.append(placeholder);
+  chipLibrary.forEach((t,i)=>{const option=document.createElement('option');option.value=String(i);option.textContent=t.name;menu.append(option)});
+}
+function initChipLibrary(){
+  try{const stored=JSON.parse(localStorage.getItem(CHIP_STORAGE)||'[]');if(Array.isArray(stored))chipLibrary=stored.filter(validChip)}catch{}
+  renderChipLibrary();
+  document.getElementById('chipLibrary').onchange=e=>{
+    const template=chipLibrary[Number(e.target.value)];
+    if(e.target.value===''||!template)return;
+    setTool('chip');chipTemplate=template;hud.textContent='Click to place '+template.name+'. Escape to cancel.';
+  };
+  const dialog=document.getElementById('chipDialog'),input=document.getElementById('chipName');
+  document.getElementById('saveChipBtn').onclick=()=>{finishGesture();input.value='Chip '+(chipLibrary.length+1);dialog.showModal();input.focus();input.select()};
+  document.getElementById('chipCancel').onclick=()=>dialog.close();
+  document.getElementById('chipForm').onsubmit=e=>{e.preventDefault();if(saveChip(input.value))dialog.close()};
+  document.getElementById('ungroupBtn').onclick=ungroupSelection;
+}
+function drawEditorBackground(){
+  for(const group of chipGroups){
+    const b=boundsFor(chipObjects(group.id));if(!b)continue;
+    ctx.save();ctx.fillStyle=group.color+'33';ctx.strokeStyle=group.color+'bb';ctx.lineWidth=1.5/viewScale;
+    ctx.beginPath();ctx.roundRect(b.x,b.y,b.right-b.x,b.bottom-b.y,10);ctx.fill();ctx.stroke();
+    ctx.font='12px Arial';ctx.textAlign='left';ctx.textBaseline='top';ctx.fillStyle=group.color;ctx.fillText(group.name,b.x+10,b.y+7);ctx.restore();
+  }
+}
+function drawEditorOverlay(){
+  const b=marquee?{x:Math.min(marquee.x,marquee.endX),y:Math.min(marquee.y,marquee.endY),right:Math.max(marquee.x,marquee.endX),bottom:Math.max(marquee.y,marquee.endY)}:selection.size>1?boundsFor(selectionObjects()):null;
+  if(b){ctx.save();ctx.strokeStyle='#83d8ff';ctx.fillStyle='#83d8ff0c';ctx.lineWidth=1/viewScale;ctx.setLineDash([6/viewScale,4/viewScale]);ctx.fillRect(b.x,b.y,b.right-b.x,b.bottom-b.y);ctx.strokeRect(b.x,b.y,b.right-b.x,b.bottom-b.y);ctx.restore()}
+  if(tool==='chip'&&chipTemplate){
+    const objects=[...chipTemplate.parts,...chipTemplate.wires],b=boundsFor(objects),x=snap(lastMouse.x),y=snap(lastMouse.y);
+    if(b){ctx.save();ctx.fillStyle=chipTemplate.color+'33';ctx.strokeStyle=chipTemplate.color;ctx.lineWidth=1/viewScale;ctx.fillRect(b.x+x,b.y+y,b.right-b.x,b.bottom-b.y);ctx.strokeRect(b.x+x,b.y+y,b.right-b.x,b.bottom-b.y);ctx.restore()}
+  }
 }
 
 class DSU{
@@ -602,7 +773,7 @@ function drawArrowHead(x,y,angle){
   ctx.moveTo(0,0);ctx.lineTo(-7,-3.5);ctx.lineTo(-7,3.5);ctx.closePath();ctx.fillStyle=lineColor;ctx.fill();ctx.restore();
 }
 function drawPart(p){
-  const sel=selected?.kind==='part'&&selected.id===p.id;
+  const sel=isSelected(p);
   const ts=terminals(p);
   ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.rot*Math.PI/2);ctx.scale(PART_SCALE,PART_SCALE);ctx.fillStyle='#e7f0f7';ctx.lineWidth=2;
   lineColor=componentGradient(p,ts);
@@ -710,9 +881,10 @@ function draw(){
     }
   }
 
+  drawEditorBackground();
   for(const w of wires){
     const a=nodeXY(w.a),b=nodeXY(w.b);
-    const sel=selected?.kind==='wire'&&selected.id===w.id;
+    const sel=isSelected(w);
     const gradient=ctx.createLinearGradient(a.x,a.y,b.x,b.y);
     gradient.addColorStop(0,voltageColor(voltageByNode.get(w.a)||0));
     gradient.addColorStop(1,voltageColor(voltageByNode.get(w.b)||0));
@@ -732,13 +904,10 @@ function draw(){
     }
   }
 
-  if(dragging&&gesture?.moved){
-    ctx.save();ctx.strokeStyle='#83d8ff55';ctx.lineWidth=1/viewScale;ctx.setLineDash([3/viewScale,4/viewScale]);
-    ctx.strokeRect(snap(dragging.x)-12,snap(dragging.y)-12,24,24);ctx.restore();
-  }
   for(const p of parts)drawPart(p);
   for(const w of wires)drawElectronFlow(w);
   for(const p of parts)drawPartElectronFlow(p);
+  drawEditorOverlay();
 
   if(tool==='wire'&&wireStart){
     const a=nodeXY(wireStart),s={x:snap(lastMouse.x),y:snap(lastMouse.y)};
@@ -767,7 +936,7 @@ document.querySelectorAll('.place').forEach(b=>{
   b.setAttribute('aria-keyshortcuts',key);
 });
 document.getElementById('dtInput').setAttribute('aria-label','Simulation time step in seconds');
-updateStatus();requestAnimationFrame(frame);
+initChipLibrary();refreshInspector();updateStatus();requestAnimationFrame(frame);
 })();
 </script>
 </body>
