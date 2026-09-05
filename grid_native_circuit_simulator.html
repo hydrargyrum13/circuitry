@@ -29,6 +29,7 @@ button:hover{background:#243744;border-color:#7294a8}
 button.active:hover{background:#d1efff}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #83d8ff;outline-offset:3px}
 button:active{transform:translateY(1px)}
+button:disabled{opacity:.35;cursor:default;transform:none;background:#17232d;border-color:#344956}
 #dtInput{background:#0b1218;color:#e7f0f7;border:1px solid #344956!important;border-radius:4px}
 #status{color:#95adbc;font-variant-numeric:tabular-nums}
 #stage{min-height:0;overflow:hidden}
@@ -47,6 +48,7 @@ canvas{touch-action:none}
   <div id="bar">
     <button id="toolSelect" class="active">Select</button>
     <button id="toolWire">Wire</button>
+    <button id="rotateBtn" title="Rotate selected component 90? clockwise (R)" disabled>? Rotate</button>
     <div class="sep"></div>
     <button class="place" data-type="V">V</button>
     <button class="place" data-type="R">R</button>
@@ -144,6 +146,13 @@ function setTool(newTool,pt=null){
 }
 document.getElementById('toolSelect').onclick=()=>setTool('select');
 document.getElementById('toolWire').onclick=()=>setTool('wire');
+document.getElementById('rotateBtn').onclick=rotateSelected;
+function rotateSelected(){
+  if(selected?.kind!=='part')return;
+  finishGesture();
+  const p=getPart(selected.id);
+  if(p){p.rot=(p.rot+1)%4;refreshInspector()}
+}
 document.querySelectorAll('.place').forEach(btn=>btn.onclick=()=>setTool('place',btn.dataset.type));
 document.getElementById('electronBtn').onclick=()=>{
   showElectrons=!showElectrons;
@@ -169,26 +178,19 @@ function addPart(type,x,y){
 function updateStatus(){statusEl.textContent=`${parts.length} parts · ${wires.length} wires`}
 
 function terminals(p){
-  const horiz=p.rot%2===0;
-  if(p.type==='GND')return[{name:'g',x:p.x,y:p.y-GRID}];
-
-  if(p.type==='NPN'||p.type==='PNP'){
-    if(horiz){
-      return[
-        {name:'b',x:p.x-GRID,y:p.y},
-        {name:'c',x:p.x+GRID,y:p.y-GRID},
-        {name:'e',x:p.x+GRID,y:p.y+GRID}
-      ];
-    }
-    return[
-      {name:'b',x:p.x,y:p.y-GRID},
-      {name:'c',x:p.x-GRID,y:p.y+GRID},
-      {name:'e',x:p.x+GRID,y:p.y+GRID}
-    ];
-  }
-
-  if(horiz)return[{name:'a',x:p.x-2*GRID,y:p.y},{name:'b',x:p.x+2*GRID,y:p.y}];
-  return[{name:'a',x:p.x,y:p.y-2*GRID},{name:'b',x:p.x,y:p.y+2*GRID}];
+  let local;
+  if(p.type==='GND')local=[{name:'g',x:0,y:-GRID}];
+  else if(p.type==='NPN'||p.type==='PNP')local=[
+    {name:'b',x:-GRID,y:0},
+    {name:'c',x:GRID,y:-GRID},
+    {name:'e',x:GRID,y:GRID}
+  ];
+  else local=[{name:'a',x:-2*GRID,y:0},{name:'b',x:2*GRID,y:0}];
+  return local.map(t=>{
+    let {x,y}=t;
+    for(let i=0;i<p.rot;i++)[x,y]=[-y,x];
+    return {name:t.name,x:p.x+x,y:p.y+y};
+  });
 }
 function getPart(id){return parts.find(p=>p.id===id)}
 function getWire(id){return wires.find(w=>w.id===id)}
@@ -306,7 +308,7 @@ addEventListener('keydown',e=>{
     selected=null;refreshInspector();updateStatus();
   }
   if((e.key==='r'||e.key==='R')&&selected?.kind==='part'){
-    finishGesture();const p=getPart(selected.id);if(p)p.rot=(p.rot+1)%2;
+    e.preventDefault();if(!e.repeat)rotateSelected();
   }
 });
 addEventListener('keyup',e=>{if(e.code==='Space'){spaceDown=false;updateCursor()}});
@@ -321,6 +323,7 @@ function eng(v,u=''){
 }
 
 function refreshInspector(){
+  document.getElementById('rotateBtn').disabled=selected?.kind!=='part';
   if(!selected){inspector.style.display='none';return}
   inspector.style.display='block';
   if(selected.kind==='wire'){
@@ -547,7 +550,7 @@ function drawArrowHead(x,y,angle){
 function drawPart(p){
   const sel=selected?.kind==='part'&&selected.id===p.id;
   const ts=terminals(p);
-  ctx.save();ctx.translate(p.x,p.y);if(p.rot%2)ctx.rotate(Math.PI/2);ctx.scale(PART_SCALE,PART_SCALE);ctx.fillStyle='#e7f0f7';ctx.lineWidth=2;
+  ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.rot*Math.PI/2);ctx.scale(PART_SCALE,PART_SCALE);ctx.fillStyle='#e7f0f7';ctx.lineWidth=2;
   lineColor=componentGradient(p,ts);
 
   if(sel||hovered===p){ctx.save();ctx.lineWidth=1/PART_SCALE;ctx.strokeStyle=sel?'#83d8ff88':'#83d8ff33';ctx.fillStyle=sel?'#83d8ff09':'#83d8ff04';const h=(p.type==='NPN'||p.type==='PNP'||p.type==='GND')?30:24;const w=p.type==='GND'?22:(p.type==='NPN'||p.type==='PNP')?32:54;ctx.beginPath();ctx.roundRect(-w,-h,w*2,h*2,5);ctx.fill();ctx.stroke();ctx.restore()}
