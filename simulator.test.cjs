@@ -135,3 +135,14 @@ test('electron spacing stays continuous around a bend',()=>{
     dots.length=0;c.simTime=.021;c.drawElectronFlowPath(path,current);const delta=distances()[0]-before[0];assert.ok(current>0?delta<0:delta>0);
   }
 });
+test('diodes block reverse current exactly, including after polarity changes',()=>{
+  for(const drop of [0,.7]){
+    const c=circuit();const source=c.add('V',{a:1,b:0},{value:5});
+    const r=c.add('R',{a:1,b:2},{value:1000});const d=c.add('D',{a:2,k:0},{value:drop});
+    for(const v of [5,-5,0,5,-12]){
+      source.value=v;c.simulate(.001);
+      if(v<=0){assert.equal(d.i,0);assert.equal(d.termI.a,0);near(r.i,0,1e-9)}
+      else near(d.i,(v-drop)/1001,1e-8);
+    }
+  }
+});

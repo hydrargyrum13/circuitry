@@ -67,3 +67,13 @@ test('saved NOT chip copies retain independent inputs and correct electrical beh
   e.simulate(.001);assert.ok(q.terminalV.c>4.7);assert.ok(copiedQ.terminalV.c<.3);
   input.value=5;copiedInput.value=0;e.simulate(.001);assert.ok(q.terminalV.c<.3);assert.ok(copiedQ.terminalV.c>4.7);
 });
+test('new diodes default to zero drop and block reverse bias in all rotations',()=>{
+  for(let rot=0;rot<4;rot++){
+    const e=editor();e.addPart('GND',0,400);const ground=e.parts[0];e.addPart('V',0,0);const source=e.parts[1];e.addPart('R',320,0);const resistor=e.parts[2];e.addPart('D',640,160);const diode=e.parts[3];
+    assert.equal(diode.value,0);diode.rot=rot;
+    let id=1000;const pin=(p,name)=>{const t=e.terminals(p).find(t=>t.name===name);return e.nodeKey(t.x,t.y)};
+    const join=(p,a,q,b)=>e.wires.push({id:id++,a:pin(p,a),b:pin(q,b),approxI:0});
+    join(source,'b',ground,'g');join(source,'a',resistor,'a');join(resistor,'b',diode,'a');join(diode,'k',ground,'g');
+    for(const v of [5,-5,5]){source.value=v;e.simulate(.001);if(v<0)assert.equal(diode.i,0);else assert.ok(Math.abs(diode.i-5/1001)<1e-8)}
+  }
+});

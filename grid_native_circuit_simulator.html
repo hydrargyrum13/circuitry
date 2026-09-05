@@ -127,7 +127,7 @@ const defaults={
  V:{value:5,unit:'V'},
  R:{value:1000,unit:'Ω'},
  C:{value:100,unit:'µF'},
- D:{value:0.7,unit:'V'},
+ D:{value:0,unit:'V'},
  SW:{closed:false},
  NPN:{beta:100},
  PNP:{beta:100},
@@ -394,7 +394,7 @@ function refreshInspector(){
     html+=`<div class="row"><span>Unit</span><select id="propUnit"><option>F</option><option>mF</option><option>µF</option><option>nF</option></select></div>`;
   }
   if(p.type==='NPN'||p.type==='PNP')html+=`<div class="row"><span>β</span><input id="propVal" type="number" step="any" value="${p.beta}"></div>`;
-  if(p.type==='D')html+=`<div class="row"><span>Forward drop (V)</span><input id="propVal" type="number" min="0" step="0.05" value="${p.value}"></div><div style="color:#91a9b9;margin:6px 0">A ? K ? bar marks cathode<br>Constant-drop model ? 1 ? on resistance</div>`;
+  if(p.type==='D')html+=`<div class="row"><span>Forward drop (V)</span><input id="propVal" type="number" min="0" step="0.05" value="${p.value}"></div><div style="color:#91a9b9;margin:6px 0">Current: A to K; bar marks cathode<br>Electrons move K to A during forward conduction.<br>Reverse current blocked; 1 ohm on resistance</div>`;
   if(p.type==='SW')html+=`<div class="row"><span>State</span><button id="toggleSw">${p.closed?'Closed':'Open'}</button></div>`;
   html+=`<hr style="border:0;border-top:1px solid #000;margin:8px 0">`;
   for(const [k,v] of Object.entries(p.terminalV||{}))html+=`<div class="row"><span>${k.toUpperCase()} V</span><span>${eng(v,'V')}</span></div>`;
@@ -650,7 +650,7 @@ function simulate(dt){
         const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
         // Piecewise-linear constant-drop diode, with 1 ohm forward resistance.
         const on=nV(a)-nV(b)>p.value;
-        addG(A,a,b,on?1:1e-12);
+        addG(A,a,b,on?1:0);
         if(on)addI(z,a,b,-p.value);
       }else if(p.type==='SW'&&!p.closed){
         const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
@@ -710,7 +710,7 @@ function simulate(dt){
       const k=vsrcs.indexOf(p),I=x[N+k]||0;p.i=I;p.termI.a=I;p.termI.b=-I;
     }else if(p.type==='D'){
       const v=p.terminalV.a-p.terminalV.k;
-      const I=v>p.value?v-p.value:v*1e-12;
+      const I=Math.max(0,v-p.value);
       p.i=I;p.termI.a=I;p.termI.k=-I;
     }else if(p.type==='SW'){
       p.i=0;p.termI.a=0;p.termI.b=0;
@@ -818,7 +818,7 @@ function drawPart(p){
   if(p.type==='V')label=p.value+' V';
   if(p.type==='R')label=p.value+' '+p.unit;
   if(p.type==='C')label=p.value+' '+p.unit;
-  if(p.type==='D')label='D ? '+p.value+' V';
+  if(p.type==='D')label='D | '+p.value+' V';
   if(p.type==='SW')label=p.closed?'closed':'open';
   if(p.type==='NPN'||p.type==='PNP')label=p.type;
   if(label){
