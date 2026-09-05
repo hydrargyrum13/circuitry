@@ -103,3 +103,35 @@ test('source long plate is on its positive a terminal side',()=>{
   const plates=segments.filter(([x1,y1,x2,y2])=>x1===x2&&y1!==y2);
   assert.ok(Math.abs(plates[0][3]-plates[0][1])>Math.abs(plates[1][3]-plates[1][1]));
 });
+test('transistor electrons stay on the drawn leads in every rotation and current direction',()=>{
+  const segments=[],dots=[];
+  const ctx=new Proxy({measureText:()=>({width:20})},{get:(o,k)=>o[k]??(()=>{})});
+  const c={ctx,GRID:40,PART_SCALE:40/24,ELECTRON_COLOR:'#83d8ff',showElectrons:true,simTime:0,isSelected:()=>false,hovered:null,selected:null,lineColor:'',componentGradient:()=>'',terminalVoltage:()=>0,voltageColor:()=>'',dot:(x,y)=>dots.push({x,y}),line:(x1,y1,x2,y2)=>segments.push([x1,y1,x2,y2])};
+  vm.createContext(c);
+  vm.runInContext(script.slice(script.indexOf('function terminals(p)'),script.indexOf('function getPart('))+script.slice(script.indexOf('function drawArrowHead'),script.indexOf('function draw(){')),c);
+  function distance(x,y,[ax,ay,bx,by]){const dx=bx-ax,dy=by-ay,t=Math.max(0,Math.min(1,((x-ax)*dx+(y-ay)*dy)/(dx*dx+dy*dy)));return Math.hypot(x-ax-t*dx,y-ay-t*dy)}
+  for(const type of ['NPN','PNP'])for(let rot=0;rot<4;rot++)for(const sign of [-1,1]){
+    const p={type,x:320,y:240,rot,termI:{b:sign*.0001,c:sign*.005,e:-sign*.0051}};
+    segments.length=0;c.drawPart(p);
+    for(const time of [0,.01,.08,.4]){
+      dots.length=0;c.simTime=time;c.drawPartElectronFlow(p);assert.ok(dots.length>=8);
+      for(const dot of dots){
+        let x=(dot.x-p.x)/c.PART_SCALE,y=(dot.y-p.y)/c.PART_SCALE;
+        for(let i=0;i<rot;i++)[x,y]=[y,-x];
+        assert.ok(segments.some(segment=>distance(x,y,segment)<1e-8),`${type}, rotation ${rot}: off-symbol particle ${x},${y}`);
+      }
+    }
+    dots.length=0;p.termI={b:0,c:0,e:0};c.drawPartElectronFlow(p);assert.equal(dots.length,0);
+  }
+});
+test('electron spacing stays continuous around a bend',()=>{
+  const dots=[],c={showElectrons:true,simTime:.02,ELECTRON_COLOR:'blue',dot:(x,y)=>dots.push({x,y})};vm.createContext(c);
+  vm.runInContext(script.slice(script.indexOf('function drawElectronFlowPath'),script.indexOf('function drawElectronFlow(w)')),c);
+  const path=[{x:0,y:0},{x:20,y:0},{x:20,y:60}];
+  const distances=()=>dots.map(p=>p.y===0?p.x:20+p.y);
+  for(const current of [-.005,.005]){
+    dots.length=0;c.simTime=.02;c.drawElectronFlowPath(path,current);const before=distances();
+    for(let i=1;i<before.length;i++)near(before[i]-before[i-1],14,1e-9);
+    dots.length=0;c.simTime=.021;c.drawElectronFlowPath(path,current);const delta=distances()[0]-before[0];assert.ok(current>0?delta<0:delta>0);
+  }
+});

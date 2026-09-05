@@ -835,20 +835,30 @@ function drawPart(p){
   lineColor='#d7e6ee';
 }
 
-function drawElectronFlowSegment(a,b,I){
+function drawElectronFlowPath(points,I){
   if(!showElectrons)return;
   const mag=Math.abs(I);
-  if(mag<1e-9)return;
-  const dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy);if(L<1)return;
-  const ux=dx/L,uy=dy/L,dir=I>0?-1:1;
-  const spacing=14;
+  if(!Number.isFinite(mag)||mag<1e-9)return;
+  const segments=[];let length=0;
+  for(let i=1;i<points.length;i++){
+    const a=points[i-1],b=points[i],size=Math.hypot(b.x-a.x,b.y-a.y);
+    if(!size)continue;
+    segments.push({a,b,start:length,size});length+=size;
+  }
+  if(length<1)return;
+  const dir=I>0?-1:1,spacing=14;
   const speed=Math.min(190,35+Math.log10(1+mag*1e6)*25);
   const shift=((simTime*speed*dir)%spacing+spacing)%spacing;
-  for(let d=shift;d<L;d+=spacing){
-    if(d<3||d>L-3)continue;
-    dot(a.x+ux*d,a.y+uy*d,2,ELECTRON_COLOR);
+  let index=0;
+  // Measure distance along the entire path so particles do not reset at bends.
+  for(let d=shift;d<length;d+=spacing){
+    if(d<3||d>length-3)continue;
+    while(index<segments.length-1&&d>segments[index].start+segments[index].size)index++;
+    const {a,b,start,size}=segments[index],t=(d-start)/size;
+    dot(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,2,ELECTRON_COLOR);
   }
 }
+function drawElectronFlowSegment(a,b,I){drawElectronFlowPath([a,b],I)}
 function drawElectronFlow(w){
   drawElectronFlowSegment(nodeXY(w.a),nodeXY(w.b),w.approxI||0);
 }
@@ -856,8 +866,17 @@ function drawPartElectronFlow(p){
   if(!showElectrons||p.type==='GND'||(p.type==='SW'&&!p.closed))return;
   const ts=terminals(p);
   if(p.type==='NPN'||p.type==='PNP'){
-    const center={x:p.x,y:p.y};
-    for(const t of ts)drawElectronFlowSegment(t,center,p.termI[t.name]||0);
+    // Follow the drawn leads and base plate, meeting at the base-lead junction.
+    const paths={b:[[-24,0],[-8,0]],
+      c:[[24,-24],[18,-24],[-8,-8],[-8,0]],
+      e:[[24,24],[18,24],[-8,8],[-8,0]]};
+    for(const [name,path] of Object.entries(paths)){
+      const points=path.map(([x,y])=>{
+        for(let i=0;i<p.rot;i++)[x,y]=[-y,x];
+        return {x:p.x+x*PART_SCALE,y:p.y+y*PART_SCALE};
+      });
+      drawElectronFlowPath(points,p.termI[name]||0);
+    }
   }else{
     // Keep the phase continuous through the component's center.
     drawElectronFlowSegment(ts[0],ts[1],p.i||0);
