@@ -77,3 +77,9 @@ test('new diodes default to zero drop and block reverse bias in all rotations',(
     for(const v of [5,-5,5]){source.value=v;e.simulate(.001);if(v<0)assert.equal(diode.i,0);else assert.ok(Math.abs(diode.i-5/1001)<1e-8)}
   }
 });
+test('LED shortcuts, switch interaction and custom chip serialization',()=>{
+  const e=editor();e.key('9');e.click(200,200);e.key('0');e.click(440,200);
+  assert.equal(e.parts[0].type,'LED');assert.equal(e.parts[0].value,2);assert.equal(e.parts[1].type,'SWLED');assert.equal(e.parts[1].closed,false);
+  e.handlers['stage:dblclick']({clientX:440,clientY:200});assert.equal(e.parts[1].closed,true);e.draw();
+  e.selectOnly(null);e.drag(100,100,550,290);e.saveChip('Lights');assert.ok(e.validChip(e.library()[0]));e.placeChip(e.library()[0],800,400);assert.equal(e.parts[3].closed,true);
+});

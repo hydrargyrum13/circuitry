@@ -146,3 +146,11 @@ test('diodes block reverse current exactly, including after polarity changes',()
     }
   }
 });
+test('LED conducts forward, blocks reverse and respects its configured drop',()=>{
+  const c=circuit(),source=c.add('V',{a:1,b:0},{value:5});c.add('R',{a:1,b:2},{value:1000});const led=c.add('LED',{a:2,k:0},{value:2});
+  for(const v of [5,-5,1,0,5]){source.value=v;c.simulate(.001);near(led.i,v>2?(v-2)/1001:0,1e-8)}
+});
+test('Switch LED has exactly the same electrical behavior as Switch',()=>{
+  function run(type,closed){const c=circuit();c.add('V',{a:1,b:0},{value:5});c.add('R',{a:1,b:2},{value:1000});const sw=c.add(type,{a:2,b:0},{closed});c.simulate(.001);return {i:sw.i,v:sw.terminalV.a}}
+  for(const closed of [false,true])assert.deepEqual(run('SWLED',closed),run('SW',closed));
+});

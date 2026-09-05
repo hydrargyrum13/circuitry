@@ -50,6 +50,9 @@ canvas{touch-action:none}
 #chipDialog h2{margin-top:0;font-size:18px}
 #chipDialog label{display:block;margin:14px 0}
 #chipDialog p{font-size:12px;line-height:1.5;color:#91a9b9}
+#componentPalette{display:flex;flex-direction:column;gap:5px;max-width:100%;overflow-x:auto}
+.componentRow{display:flex;gap:5px;flex-shrink:0}
+.componentRow button{flex-shrink:0}
 </style>
 </head>
 <body>
@@ -62,6 +65,7 @@ canvas{touch-action:none}
     <button id="toolWire" title="Wire (Space)" aria-keyshortcuts="Space">Wire [Space]</button>
     <button id="rotateBtn" title="Rotate selected component 90? clockwise (R)" disabled>? Rotate</button>
     <div class="sep"></div>
+    <div id="componentPalette"><div class="componentRow">
     <button class="place" data-type="V">DC Voltage Source</button>
     <button class="place" data-type="R">Resistor</button>
     <button class="place" data-type="C">Capacitor</button>
@@ -70,6 +74,10 @@ canvas{touch-action:none}
     <button class="place" data-type="NPN">NPN Transistor</button>
     <button class="place" data-type="PNP">PNP Transistor</button>
     <button class="place" data-type="GND">Ground</button>
+    </div><div class="componentRow">
+    <button class="place" data-type="LED">LED</button>
+    <button class="place" data-type="SWLED">Switch LED</button>
+    </div></div>
     <div class="sep"></div>
     <button id="electronBtn" class="active">Electrons</button>
     <button id="runBtn" class="active">Run</button>
@@ -99,7 +107,7 @@ canvas{touch-action:none}
 const GRID=40;
 const PART_SCALE=GRID/24;
 const ELECTRON_COLOR='#83d8ff';
-const componentShortcuts={'1':'V','2':'R','3':'C','4':'D','5':'SW','6':'NPN','7':'PNP','8':'GND'};
+const componentShortcuts={'1':'V','2':'R','3':'C','4':'D','5':'SW','6':'NPN','7':'PNP','8':'GND','9':'LED','0':'SWLED'};
 
 const cv=document.getElementById('cv');
 const ctx=cv.getContext('2d');
@@ -128,12 +136,14 @@ const defaults={
  R:{value:1000,unit:'Ω'},
  C:{value:100,unit:'µF'},
  D:{value:0,unit:'V'},
+ LED:{value:2,unit:'V'},
+ SWLED:{closed:false},
  SW:{closed:false},
  NPN:{beta:100},
  PNP:{beta:100},
  GND:{}
 };
-const names={V:'DC Voltage Source',R:'Resistor',C:'Capacitor',D:'Diode',SW:'Switch',NPN:'NPN Transistor',PNP:'PNP Transistor',GND:'Ground'};
+const names={V:'DC Voltage Source',R:'Resistor',C:'Capacitor',D:'Diode',LED:'LED',SWLED:'Switch LED',SW:'Switch',NPN:'NPN Transistor',PNP:'PNP Transistor',GND:'Ground'};
 function clone(v){return JSON.parse(JSON.stringify(v))}
 function snap(v){return Math.round(v/GRID)*GRID}
 function nodeKey(x,y){return `${Math.round(x/GRID)},${Math.round(y/GRID)}`}
@@ -211,7 +221,7 @@ function terminals(p){
     {name:'c',x:GRID,y:-GRID},
     {name:'e',x:GRID,y:GRID}
   ];
-  else local=[{name:'a',x:-2*GRID,y:0},{name:p.type==='D'?'k':'b',x:2*GRID,y:0}];
+  else local=[{name:'a',x:-2*GRID,y:0},{name:(p.type==='D'||p.type==='LED')?'k':'b',x:2*GRID,y:0}];
   return local.map(t=>{
     let {x,y}=t;
     for(let i=0;i<p.rot;i++)[x,y]=[-y,x];
@@ -329,7 +339,7 @@ stage.addEventListener('wheel',e=>{
 stage.addEventListener('contextmenu',e=>e.preventDefault());
 stage.addEventListener('dblclick',e=>{
   const m=worldPos(mousePos(e)),p=hitPart(m.x,m.y);
-  if(p&&p.type==='SW'){p.closed=!p.closed;refreshInspector()}
+  if(p&&(p.type==='SW'||p.type==='SWLED')){p.closed=!p.closed;refreshInspector()}
 });
 
 addEventListener('keydown',e=>{
@@ -394,8 +404,8 @@ function refreshInspector(){
     html+=`<div class="row"><span>Unit</span><select id="propUnit"><option>F</option><option>mF</option><option>µF</option><option>nF</option></select></div>`;
   }
   if(p.type==='NPN'||p.type==='PNP')html+=`<div class="row"><span>β</span><input id="propVal" type="number" step="any" value="${p.beta}"></div>`;
-  if(p.type==='D')html+=`<div class="row"><span>Forward drop (V)</span><input id="propVal" type="number" min="0" step="0.05" value="${p.value}"></div><div style="color:#91a9b9;margin:6px 0">Current: A to K; bar marks cathode<br>Electrons move K to A during forward conduction.<br>Reverse current blocked; 1 ohm on resistance</div>`;
-  if(p.type==='SW')html+=`<div class="row"><span>State</span><button id="toggleSw">${p.closed?'Closed':'Open'}</button></div>`;
+  if((p.type==='D'||p.type==='LED'))html+=`<div class="row"><span>Forward drop (V)</span><input id="propVal" type="number" min="0" step="0.05" value="${p.value}"></div><div style="color:#91a9b9;margin:6px 0">Current: A to K; bar marks cathode<br>Electrons move K to A during forward conduction.<br>Reverse current blocked; 1 ohm on resistance</div>`;
+  if((p.type==='SW'||p.type==='SWLED'))html+=`<div class="row"><span>State</span><button id="toggleSw">${p.closed?'Closed':'Open'}</button></div>`;
   html+=`<hr style="border:0;border-top:1px solid #000;margin:8px 0">`;
   for(const [k,v] of Object.entries(p.terminalV||{}))html+=`<div class="row"><span>${k.toUpperCase()} V</span><span>${eng(v,'V')}</span></div>`;
   for(const [k,v] of Object.entries(p.termI||{}))html+=`<div class="row"><span>${k.toUpperCase()} I</span><span>${eng(v,'A')}</span></div>`;
@@ -404,7 +414,7 @@ function refreshInspector(){
   const inp=document.getElementById('propVal'),unit=document.getElementById('propUnit'),sw=document.getElementById('toggleSw');
   if(inp)inp.oninput=()=>{
     const v=Number(inp.value);if(!Number.isFinite(v))return;
-    if(p.type==='D')p.value=Math.max(0,v);else if(['V','R','C'].includes(p.type))p.value=v;else p.beta=Math.max(1,v);
+    if((p.type==='D'||p.type==='LED'))p.value=Math.max(0,v);else if(['V','R','C'].includes(p.type))p.value=v;else p.beta=Math.max(1,v);
   };
   if(unit){unit.value=p.unit;unit.onchange=()=>p.unit=unit.value}
   if(sw)sw.onclick=()=>{p.closed=!p.closed;refreshInspector()}
@@ -599,7 +609,7 @@ function simulate(dt){
   for(const w of wires)dsu.u(idx.get(w.a),idx.get(w.b));
 
   // Closed switches short their two terminal grid nodes.
-  for(const p of parts.filter(p=>p.type==='SW'&&p.closed)){
+  for(const p of parts.filter(p=>(p.type==='SW'||p.type==='SWLED')&&p.closed)){
     const ts=terminals(p);
     dsu.u(idx.get(nodeKey(ts[0].x,ts[0].y)),idx.get(nodeKey(ts[1].x,ts[1].y)));
   }
@@ -646,13 +656,13 @@ function simulate(dt){
       if(p.type==='R'){
         const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
         addG(A,a,b,1/Math.max(1e-12,valueSI(p)));
-      }else if(p.type==='D'){
+      }else if((p.type==='D'||p.type==='LED')){
         const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
         // Piecewise-linear constant-drop diode, with 1 ohm forward resistance.
         const on=nV(a)-nV(b)>p.value;
         addG(A,a,b,on?1:0);
         if(on)addI(z,a,b,-p.value);
-      }else if(p.type==='SW'&&!p.closed){
+      }else if((p.type==='SW'||p.type==='SWLED')&&!p.closed){
         const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
         addG(A,a,b,1e-12);
       }else if(p.type==='C'){
@@ -708,11 +718,11 @@ function simulate(dt){
       p.i=I;p.termI.a=I;p.termI.b=-I;p.capV=p.terminalV.a-p.terminalV.b;
     }else if(p.type==='V'){
       const k=vsrcs.indexOf(p),I=x[N+k]||0;p.i=I;p.termI.a=I;p.termI.b=-I;
-    }else if(p.type==='D'){
+    }else if((p.type==='D'||p.type==='LED')){
       const v=p.terminalV.a-p.terminalV.k;
       const I=Math.max(0,v-p.value);
       p.i=I;p.termI.a=I;p.termI.k=-I;
-    }else if(p.type==='SW'){
+    }else if((p.type==='SW'||p.type==='SWLED')){
       p.i=0;p.termI.a=0;p.termI.b=0;
     }else if(p.type==='GND'){
       p.termI.g=0;
@@ -737,7 +747,7 @@ function simulate(dt){
   // Recover ideal-wire and closed-switch currents using Kirchhoff's current law.
   // Equal edge weights split current evenly around redundant ideal paths.
   const edges=wires.map(w=>({a:idx.get(w.a),b:idx.get(w.b),wire:w}));
-  for(const p of parts.filter(p=>p.type==='SW'&&p.closed)){
+  for(const p of parts.filter(p=>(p.type==='SW'||p.type==='SWLED')&&p.closed)){
     const ts=terminals(p);
     edges.push({a:idx.get(nodeKey(ts[0].x,ts[0].y)),b:idx.get(nodeKey(ts[1].x,ts[1].y)),part:p});
   }
@@ -784,7 +794,16 @@ function drawPart(p){
     line(-48,0,-24,0,2);
     ctx.beginPath();ctx.moveTo(-24,0);ctx.lineTo(-18,-8);ctx.lineTo(-10,8);ctx.lineTo(-2,-8);ctx.lineTo(6,8);ctx.lineTo(14,-8);ctx.lineTo(22,8);ctx.lineTo(24,0);ctx.stroke();
     line(24,0,48,0,2);
-  }else if(p.type==='D'){
+  }else if(p.type==='LED'||p.type==='SWLED'){
+    line(-48,0,-13,0,2);line(13,0,48,0,2);
+    const lit=p.type==='SWLED'?p.closed:p.i>1e-9;
+    ctx.save();ctx.beginPath();ctx.arc(0,0,13,0,Math.PI*2);
+    ctx.fillStyle=lit?'#5dff83':'#143522';ctx.strokeStyle=lit?'#b5ffca':'#588569';
+    if(lit){ctx.shadowColor='#5dff83';ctx.shadowBlur=16}
+    ctx.fill();ctx.lineWidth=2;ctx.stroke();ctx.shadowBlur=0;
+    ctx.beginPath();ctx.arc(-4,-4,3,0,Math.PI*2);ctx.fillStyle=lit?'#e0ffe9':'#365440';ctx.fill();ctx.restore();
+    if(p.type==='LED'){line(17,-10,17,10,1.5)}
+  }else if((p.type==='D'||p.type==='LED')){
     line(-48,0,-13,0,2);line(13,0,48,0,2);
     ctx.beginPath();ctx.moveTo(-13,-14);ctx.lineTo(13,0);ctx.lineTo(-13,14);ctx.closePath();ctx.stroke();
     line(13,-14,13,14,2);
@@ -793,7 +812,7 @@ function drawPart(p){
   }else if(p.type==='V'){
     line(-48,0,-12,0,2);line(-12,-18,-12,18,2);line(4,-12,4,12,2);line(4,0,48,0,2);
     ctx.font='10px Arial';ctx.fillText('+',-7,-22);ctx.fillText('−',10,-16);
-  }else if(p.type==='SW'){
+  }else if((p.type==='SW'||p.type==='SWLED')){
     line(-48,0,-16,0,2);line(16,0,48,0,2);dot(-16,0,2.5);dot(16,0,2.5);
     if(p.closed)line(-16,0,16,0,2);else line(-16,0,10,-14,2);
   }else if(p.type==='GND'){
@@ -819,7 +838,8 @@ function drawPart(p){
   if(p.type==='R')label=p.value+' '+p.unit;
   if(p.type==='C')label=p.value+' '+p.unit;
   if(p.type==='D')label='D | '+p.value+' V';
-  if(p.type==='SW')label=p.closed?'closed':'open';
+  if(p.type==='LED')label='LED | '+p.value+' V';
+  if((p.type==='SW'||p.type==='SWLED'))label=(p.type==='SWLED'?'Switch LED | ':'')+(p.closed?'closed':'open');
   if(p.type==='NPN'||p.type==='PNP')label=p.type;
   if(label){
     const vertical=p.rot%2;
@@ -863,7 +883,7 @@ function drawElectronFlow(w){
   drawElectronFlowSegment(nodeXY(w.a),nodeXY(w.b),w.approxI||0);
 }
 function drawPartElectronFlow(p){
-  if(!showElectrons||p.type==='GND'||(p.type==='SW'&&!p.closed))return;
+  if(!showElectrons||p.type==='GND'||((p.type==='SW'||p.type==='SWLED')&&!p.closed))return;
   const ts=terminals(p);
   if(p.type==='NPN'||p.type==='PNP'){
     // Follow the drawn leads and base plate, meeting at the base-lead junction.
