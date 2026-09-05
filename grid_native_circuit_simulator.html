@@ -398,6 +398,22 @@ function solveLinear(A,b){
   return M.map(r=>Number.isFinite(r[n])?r[n]:0);
 }
 
+// Transport form of Ebers-Moll, with forward beta and reverse beta = 1.
+// All terminal currents are positive into the device, for both NPN and PNP.
+function transistorModel(p,vb,vc,ve){
+  const polarity=p.type==='NPN'?1:-1,beta=Math.max(1,p.beta);
+  function junction(v){
+    const u=v/.02585,limit=40,ex=Math.exp(Math.min(limit,u));
+    return {i:1e-14*(ex*(u>limit?1+u-limit:1)-1),g:1e-14*ex/.02585};
+  }
+  const be=junction(polarity*(vb-ve)),bc=junction(polarity*(vb-vc));
+  const ib=be.i/beta+bc.i,ic=be.i-2*bc.i;
+  const db=[be.g/beta+bc.g,-bc.g,-be.g/beta];
+  const dc=[be.g-2*bc.g,2*bc.g,-be.g];
+  return {currents:[polarity*ib,polarity*ic,-polarity*(ib+ic)],
+    jacobian:[db,dc,db.map((g,i)=>-g-dc[i])]};
+}
+
 function simulate(dt){
   const nodeSet=new Set();
   for(const w of wires){nodeSet.add(w.a);nodeSet.add(w.b)}
@@ -435,6 +451,13 @@ function simulate(dt){
   const vsrcs=parts.filter(p=>p.type==='V');
   const N=nodeRoots.length,M=vsrcs.length,size=N+M;
   let x=Array(size).fill(0);
+  for(const key of nodes){
+    const xy=nodeXY(key),ni=nodeI(xy.x,xy.y);
+    if(ni>=0)x[ni]=voltageByNode.get(key)||0;
+  }
+  const transistors=parts.filter(p=>p.type==='NPN'||p.type==='PNP').map(p=>({
+    part:p,indices:terminals(p).map(t=>nodeI(t.x,t.y))
+  }));
 
   function addG(A,a,b,g){
     if(a>=0)A[a][a]+=g;if(b>=0)A[b][b]+=g;
@@ -443,7 +466,7 @@ function simulate(dt){
   function addI(z,a,b,I){if(a>=0)z[a]-=I;if(b>=0)z[b]+=I}
   function nV(n){return n>=0?x[n]:0}
 
-  for(let iter=0;iter<16;iter++){
+  for(let iter=0;iter<160;iter++){
     const A=Array.from({length:size},()=>Array(size).fill(0)),z=Array(size).fill(0);
     for(let i=0;i<N;i++)A[i][i]+=1e-12;
 
@@ -475,30 +498,30 @@ function simulate(dt){
       z[row]+=p.value;
     });
 
-    for(const p of parts.filter(p=>p.type==='NPN'||p.type==='PNP')){
-      const ts=terminals(p);
-      const tb=ts.find(t=>t.name==='b'),tc=ts.find(t=>t.name==='c'),te=ts.find(t=>t.name==='e');
-      const nb=nodeI(tb.x,tb.y),nc=nodeI(tc.x,tc.y),ne=nodeI(te.x,te.y);
-      const s=p.type==='NPN'?1:-1;
-      const vb=nV(nb),vc=nV(nc),ve=nV(ne);
-      const Vbe=s*(vb-ve),Vbc=s*(vb-vc);
-      const Is=1e-14,VT=.02585,beta=Math.max(1,p.beta),alpha=beta/(beta+1);
-      const expbe=Math.exp(Math.max(-40,Math.min(25,Vbe/VT))),expbc=Math.exp(Math.max(-40,Math.min(25,Vbc/VT)));
-      const Ibe=Is*(expbe-1),Ibc=Is*(expbc-1),gbe=Is/VT*expbe,gbc=Is/VT*expbc;
-      addG(A,nb,ne,gbe);addI(z,nb,ne,s*(Ibe-gbe*Vbe));
-      addG(A,nb,nc,gbc);addI(z,nb,nc,s*(Ibc-gbc*Vbc));
-      const gmb=alpha*gbe,gmc=-alpha*gbc,gme=-alpha*gbe+alpha*gbc;
-      const I0=alpha*(Ibe-Ibc)-s*(gmb*vb+gmc*vc+gme*ve);
-      const outP=s>0?nc:ne,outN=s>0?ne:nc;
-      const coeffs=[[nb,s*gmb],[nc,s*gmc],[ne,s*gme]];
-      if(outP>=0)for(const[n,g]of coeffs)if(n>=0)A[outP][n]+=g;
-      if(outN>=0)for(const[n,g]of coeffs)if(n>=0)A[outN][n]-=g;
-      addI(z,outP,outN,I0);
+    for(const {part,indices} of transistors){
+      const v=indices.map(nV),model=transistorModel(part,...v);
+      indices.forEach((row,i)=>{
+        if(row<0)return;
+        const derivatives=model.jacobian[i];
+        indices.forEach((col,j)=>{if(col>=0)A[row][col]+=derivatives[j]});
+        z[row]+=derivatives.reduce((sum,g,j)=>sum+g*v[j],0)-model.currents[i];
+      });
     }
 
     const nx=solveLinear(A,z);
-    let err=0;for(let i=0;i<size;i++)err=Math.max(err,Math.abs(nx[i]-x[i]));
-    x=nx;if(err<1e-7)break;
+    // Limit junction-voltage changes to keep Newton steps on the exponential curve.
+    let damping=1;
+    for(const {indices:[nb,nc,ne]} of transistors){
+      const delta=n=>(n>=0?nx[n]-x[n]:0);
+      const jump=Math.max(Math.abs(delta(nb)-delta(ne)),Math.abs(delta(nb)-delta(nc)));
+      if(jump>.1)damping=Math.min(damping,.1/jump);
+    }
+    let err=0;
+    for(let i=0;i<size;i++){
+      err=Math.max(err,Math.abs(nx[i]-x[i]));
+      x[i]+=damping*(nx[i]-x[i]);
+    }
+    if(err<1e-7)break;
   }
 
   for(const p of parts){
@@ -523,14 +546,8 @@ function simulate(dt){
     }else if(p.type==='GND'){
       p.termI.g=0;
     }else{
-      const s=p.type==='NPN'?1:-1,vb=p.terminalV.b,vc=p.terminalV.c,ve=p.terminalV.e;
-      const Is=1e-14,VT=.02585,beta=Math.max(1,p.beta),alpha=beta/(beta+1);
-      const Vbe=s*(vb-ve),Vbc=s*(vb-vc);
-      const expbe=Math.exp(Math.max(-40,Math.min(25,Vbe/VT))),expbc=Math.exp(Math.max(-40,Math.min(25,Vbc/VT)));
-      const Ibe=Is*(expbe-1),Ibc=Is*(expbc-1);
-      p.termI.b=s*(Ibe+Ibc);
-      p.termI.c=s*(alpha*(Ibe-Ibc)-Ibc);
-      p.termI.e=s*(-Ibe-alpha*(Ibe-Ibc));
+      const {currents}=transistorModel(p,p.terminalV.b,p.terminalV.c,p.terminalV.e);
+      [p.termI.b,p.termI.c,p.termI.e]=currents;
       p.i=p.termI.c;
     }
   }
@@ -603,8 +620,8 @@ function drawPart(p){
   }else if(p.type==='C'){
     line(-48,0,-8,0,2);line(-8,-14,-8,14,2);line(8,-14,8,14,2);line(8,0,48,0,2);
   }else if(p.type==='V'){
-    line(-48,0,-12,0,2);line(-12,-12,-12,12,2);line(4,-18,4,18,2);line(4,0,48,0,2);
-    ctx.font='10px Arial';ctx.fillText('+',-7,-16);ctx.fillText('−',10,-16);
+    line(-48,0,-12,0,2);line(-12,-18,-12,18,2);line(4,-12,4,12,2);line(4,0,48,0,2);
+    ctx.font='10px Arial';ctx.fillText('+',-7,-22);ctx.fillText('−',10,-16);
   }else if(p.type==='SW'){
     line(-48,0,-16,0,2);line(16,0,48,0,2);dot(-16,0,2.5);dot(16,0,2.5);
     if(p.closed)line(-16,0,16,0,2);else line(-16,0,10,-14,2);
