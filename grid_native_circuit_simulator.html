@@ -867,7 +867,8 @@ function drawElectronFlowPath(points,I){
   }
   if(length<1)return;
   const dir=I>0?-1:1,spacing=14;
-  const speed=Math.min(190,35+Math.log10(1+mag*1e6)*25);
+  // Linear visualization scale: 1 mA = 20 world pixels per simulation second.
+  const speed=mag*20000;
   const shift=((simTime*speed*dir)%spacing+spacing)%spacing;
   let index=0;
   // Measure distance along the entire path so particles do not reset at bends.

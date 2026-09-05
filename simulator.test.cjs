@@ -154,3 +154,18 @@ test('Switch LED has exactly the same electrical behavior as Switch',()=>{
   function run(type,closed){const c=circuit();c.add('V',{a:1,b:0},{value:5});c.add('R',{a:1,b:2},{value:1000});const sw=c.add(type,{a:2,b:0},{closed});c.simulate(.001);return {i:sw.i,v:sw.terminalV.a}}
   for(const closed of [false,true])assert.deepEqual(run('SWLED',closed),run('SW',closed));
 });
+test('electron velocity is proportional to current without a minimum speed or upper cap',()=>{
+  const dots=[],c={showElectrons:true,simTime:0,ELECTRON_COLOR:'blue',dot:(x,y)=>dots.push({x,y})};vm.createContext(c);
+  vm.runInContext(script.slice(script.indexOf('function drawElectronFlowPath'),script.indexOf('function drawElectronFlow(w)')),c);
+  const path=[{x:0,y:0},{x:200,y:0}];
+  function velocity(current){
+    const dt=.00001;dots.length=0;c.simTime=0;c.drawElectronFlowPath(path,current);const before=dots[0].x;
+    dots.length=0;c.simTime=dt;c.drawElectronFlowPath(path,current);return (dots[0].x-before)/dt;
+  }
+  for(const current of [1e-6,.001,.002,.005,.01,.1,1]){
+    near(velocity(current),-current*20000,1e-6);
+    near(velocity(-current),current*20000,1e-6);
+  }
+  near(velocity(.002)/velocity(.001),2,1e-8);
+  dots.length=0;c.drawElectronFlowPath(path,0);assert.equal(dots.length,0);
+});
