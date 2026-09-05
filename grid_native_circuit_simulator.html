@@ -81,6 +81,7 @@ canvas{touch-action:none}
 const GRID=40;
 const PART_SCALE=GRID/24;
 const ELECTRON_COLOR='#83d8ff';
+const componentShortcuts={'1':'V','2':'R','3':'C','4':'D','5':'SW','6':'NPN','7':'PNP','8':'GND'};
 
 const cv=document.getElementById('cv');
 const ctx=cv.getContext('2d');
@@ -296,6 +297,13 @@ stage.addEventListener('dblclick',e=>{
 
 addEventListener('keydown',e=>{
   if(e.target.matches('input,select,textarea')||e.target.isContentEditable)return;
+  if(e.ctrlKey||e.metaKey||e.altKey||e.isComposing)return;
+  const componentType=componentShortcuts[e.key];
+  if(componentType&&!e.shiftKey&&!spaceDown){
+    e.preventDefault();
+    if(!e.repeat)setTool('place',componentType);
+    return;
+  }
   if(e.key==='Escape'){finishGesture(true);setTool('select');return}
   if(e.code==='Space'){spaceDown=true;e.preventDefault();updateCursor()}
   if((e.key==='Delete'||e.key==='Backspace')&&selected){
@@ -735,7 +743,13 @@ function frame(t){
   draw();
   requestAnimationFrame(frame);
 }
-document.querySelectorAll('.place').forEach(b=>{b.title=names[b.dataset.type];b.setAttribute('aria-label',names[b.dataset.type])});
+document.querySelectorAll('.place').forEach(b=>{
+  const type=b.dataset.type,key=Object.keys(componentShortcuts).find(k=>componentShortcuts[k]===type);
+  b.textContent=type+' ['+key+']';
+  b.title=names[type]+' ('+key+')';
+  b.setAttribute('aria-label',names[type]+' (shortcut '+key+')');
+  b.setAttribute('aria-keyshortcuts',key);
+});
 document.getElementById('dtInput').setAttribute('aria-label','Simulation time step in seconds');
 updateStatus();requestAnimationFrame(frame);
 })();
