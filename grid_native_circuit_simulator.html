@@ -324,13 +324,21 @@ function eng(v,u=''){
   return(v/s).toFixed(3).replace(/\.?0+$/,'')+' '+p+u;
 }
 
+function updateWireReadings(w){
+  const voltage=document.getElementById('wireVoltage'),current=document.getElementById('wireCurrent');
+  if(voltage)voltage.textContent=eng(voltageByNode.get(w.a)??NaN,'V');
+  if(current)current.textContent=eng(w.approxI||0,'A');
+}
+
 function refreshInspector(){
   document.getElementById('rotateBtn').disabled=selected?.kind!=='part';
   if(!selected){inspector.style.display='none';return}
   inspector.style.display='block';
   if(selected.kind==='wire'){
     const w=getWire(selected.id);
-    inspector.innerHTML=`<b>Wire</b><div class="row"><span>Current</span><span>${eng(w?.approxI||0,'A')}</span></div>`;
+    if(!w){inspector.style.display='none';return}
+    inspector.innerHTML='<b>Wire</b><div class="row"><span>Relative voltage</span><span id="wireVoltage"></span></div><div class="row"><span>Current</span><span id="wireCurrent"></span></div><div style="color:#91a9b9;margin-top:6px">Reference: '+(parts.some(p=>p.type==='GND')?'GND (0 V)':'automatic circuit reference (0 V)')+'</div>';
+    updateWireReadings(w);
     return;
   }
   const p=getPart(selected.id);if(!p){inspector.style.display='none';return}
@@ -531,19 +539,28 @@ function simulate(dt){
   for(const p of parts)for(const value of Object.values(p.terminalV))voltageMax=Math.max(voltageMax,Math.abs(value));
   voltageMax=Math.max(voltageMax,1e-9);
 
-  // Approximate wire current from attached component currents at its endpoints.
-  function endpointInjection(key){
-    const xy=nodeXY(key);let sum=0;
-    for(const p of parts){
-      for(const t of terminals(p)){
-        if(t.x===xy.x&&t.y===xy.y)sum+=(p.termI?.[t.name]||0);
-      }
-    }
-    return sum;
+  // Recover ideal-wire and closed-switch currents using Kirchhoff's current law.
+  // Equal edge weights split current evenly around redundant ideal paths.
+  const edges=wires.map(w=>({a:idx.get(w.a),b:idx.get(w.b),wire:w}));
+  for(const p of parts.filter(p=>p.type==='SW'&&p.closed)){
+    const ts=terminals(p);
+    edges.push({a:idx.get(nodeKey(ts[0].x,ts[0].y)),b:idx.get(nodeKey(ts[1].x,ts[1].y)),part:p});
   }
-  for(const w of wires){
-    const ia=endpointInjection(w.a),ib=endpointInjection(w.b);
-    w.approxI=(ib-ia)/2;
+  const flowDSU=new DSU(nodes.length),injection=Array(nodes.length).fill(0);
+  for(const edge of edges)flowDSU.u(edge.a,edge.b);
+  for(const p of parts)for(const t of terminals(p)){
+    injection[idx.get(nodeKey(t.x,t.y))]+=p.termI[t.name]||0;
+  }
+  const anchors=new Set(nodes.map((_,i)=>flowDSU.f(i)));
+  const free=nodes.map((_,i)=>i).filter(i=>!anchors.has(i));
+  const fi=new Map(free.map((n,i)=>[n,i]));
+  const A=free.map(()=>Array(free.length).fill(0)),z=free.map(n=>-injection[n]);
+  for(const edge of edges)addG(A,fi.get(edge.a)??-1,fi.get(edge.b)??-1,1);
+  const potential=solveLinear(A,z);
+  for(const edge of edges){
+    const I=(potential[fi.get(edge.a)]||0)-(potential[fi.get(edge.b)]||0);
+    if(edge.wire)edge.wire.approxI=I;
+    else {edge.part.i=I;edge.part.termI.a=I;edge.part.termI.b=-I}
   }
 
   simTime+=dt;
@@ -641,10 +658,15 @@ function drawElectronFlow(w){
   drawElectronFlowSegment(nodeXY(w.a),nodeXY(w.b),w.approxI||0);
 }
 function drawPartElectronFlow(p){
-  if(!['V','R','SW','D'].includes(p.type))return;
-  const ts=terminals(p),center={x:p.x,y:p.y};
-  drawElectronFlowSegment({x:ts[0].x,y:ts[0].y},center,p.i||0);
-  drawElectronFlowSegment(center,{x:ts[1].x,y:ts[1].y},p.i||0);
+  if(!showElectrons||p.type==='GND'||(p.type==='SW'&&!p.closed))return;
+  const ts=terminals(p);
+  if(p.type==='NPN'||p.type==='PNP'){
+    const center={x:p.x,y:p.y};
+    for(const t of ts)drawElectronFlowSegment(t,center,p.termI[t.name]||0);
+  }else{
+    // Keep the phase continuous through the component's center.
+    drawElectronFlowSegment(ts[0],ts[1],p.i||0);
+  }
 }
 
 function draw(){
@@ -708,6 +730,7 @@ function frame(t){
     const steps=Math.max(1,Math.min(20,Math.ceil(elapsed/dt)));
     for(let i=0;i<steps;i++)simulate(dt);
   }
+  if(selected?.kind==='wire'){const w=getWire(selected.id);if(w)updateWireReadings(w)}
   lastT=t;
   draw();
   requestAnimationFrame(frame);
