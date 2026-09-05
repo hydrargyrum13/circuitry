@@ -47,17 +47,17 @@ canvas{touch-action:none}
 <div id="app">
   <div id="bar">
     <button id="toolSelect" class="active">Select</button>
-    <button id="toolWire">Wire</button>
+    <button id="toolWire" title="Wire (Space)" aria-keyshortcuts="Space">Wire [Space]</button>
     <button id="rotateBtn" title="Rotate selected component 90? clockwise (R)" disabled>? Rotate</button>
     <div class="sep"></div>
-    <button class="place" data-type="V">V</button>
-    <button class="place" data-type="R">R</button>
-    <button class="place" data-type="C">C</button>
-    <button class="place" data-type="D">D</button>
-    <button class="place" data-type="SW">SW</button>
-    <button class="place" data-type="NPN">NPN</button>
-    <button class="place" data-type="PNP">PNP</button>
-    <button class="place" data-type="GND">GND</button>
+    <button class="place" data-type="V">DC Voltage Source</button>
+    <button class="place" data-type="R">Resistor</button>
+    <button class="place" data-type="C">Capacitor</button>
+    <button class="place" data-type="D">Diode</button>
+    <button class="place" data-type="SW">Switch</button>
+    <button class="place" data-type="NPN">NPN Transistor</button>
+    <button class="place" data-type="PNP">PNP Transistor</button>
+    <button class="place" data-type="GND">Ground</button>
     <div class="sep"></div>
     <button id="electronBtn" class="active">Electrons</button>
     <button id="runBtn" class="active">Run</button>
@@ -72,7 +72,7 @@ canvas{touch-action:none}
     <canvas id="cv"></canvas>
     <div id="hud">Grid-native schematic. Every grid point is a junction node.</div>
     <div id="inspector"></div>
-    <div id="hint">Wheel zoom · middle drag pan · Space+drag pan · R rotate · Del delete</div>
+    <div id="hint">Wheel zoom · middle drag pan · Space wire · R rotate · Del delete</div>
   </div>
 </div>
 
@@ -114,7 +114,7 @@ const defaults={
  PNP:{beta:100},
  GND:{}
 };
-const names={V:'DC Source',R:'Resistor',C:'Capacitor',D:'Diode',SW:'Switch',NPN:'NPN Transistor',PNP:'PNP Transistor',GND:'Ground'};
+const names={V:'DC Voltage Source',R:'Resistor',C:'Capacitor',D:'Diode',SW:'Switch',NPN:'NPN Transistor',PNP:'PNP Transistor',GND:'Ground'};
 function clone(v){return JSON.parse(JSON.stringify(v))}
 function snap(v){return Math.round(v/GRID)*GRID}
 function nodeKey(x,y){return `${Math.round(x/GRID)},${Math.round(y/GRID)}`}
@@ -225,8 +225,8 @@ function hitWire(x,y){
   return null;
 }
 
-let panning=null,spaceDown=false,gesture=null,hovered=null;
-function updateCursor(){cv.style.cursor=panning||dragging?'grabbing':spaceDown?'grab':tool==='select'?(hovered?'grab':'default'):'crosshair'}
+let panning=null,gesture=null,hovered=null;
+function updateCursor(){cv.style.cursor=panning||dragging?'grabbing':tool==='select'?(hovered?'grab':'default'):'crosshair'}
 function finishGesture(cancel=false){
   if(dragging&&gesture){
     dragging.x=cancel?gesture.x:snap(dragging.x);
@@ -239,7 +239,7 @@ cv.addEventListener('pointerdown',e=>{
   if(e.button!==0&&e.button!==1)return;
   const m=mousePos(e),world=worldPos(m);lastMouse=world;
   cv.setPointerCapture(e.pointerId);
-  if(e.button===1||spaceDown){
+  if(e.button===1){
     panning={x:m.x,y:m.y,viewX,viewY};e.preventDefault();updateCursor();return;
   }
   const s={x:snap(world.x),y:snap(world.y)};
@@ -278,7 +278,7 @@ cv.addEventListener('pointerup',()=>finishGesture());
 cv.addEventListener('pointercancel',()=>finishGesture(true));
 cv.addEventListener('lostpointercapture',()=>finishGesture());
 cv.addEventListener('pointerleave',()=>{hovered=null;updateCursor()});
-addEventListener('blur',()=>{spaceDown=false;finishGesture(true)});
+addEventListener('blur',()=>{finishGesture(true)});
 stage.addEventListener('wheel',e=>{
   if(e.target!==cv)return;
   e.preventDefault();
@@ -299,13 +299,13 @@ addEventListener('keydown',e=>{
   if(e.target.matches('input,select,textarea')||e.target.isContentEditable)return;
   if(e.ctrlKey||e.metaKey||e.altKey||e.isComposing)return;
   const componentType=componentShortcuts[e.key];
-  if(componentType&&!e.shiftKey&&!spaceDown){
+  if(componentType&&!e.shiftKey){
     e.preventDefault();
     if(!e.repeat)setTool('place',componentType);
     return;
   }
   if(e.key==='Escape'){finishGesture(true);setTool('select');return}
-  if(e.code==='Space'){spaceDown=true;e.preventDefault();updateCursor()}
+  if(e.code==='Space'){e.preventDefault();if(!e.repeat)setTool('wire');return}
   if((e.key==='Delete'||e.key==='Backspace')&&selected){
     e.preventDefault();finishGesture();
     if(selected.kind==='part'){
@@ -321,7 +321,6 @@ addEventListener('keydown',e=>{
     e.preventDefault();if(!e.repeat)rotateSelected();
   }
 });
-addEventListener('keyup',e=>{if(e.code==='Space'){spaceDown=false;updateCursor()}});
 
 function eng(v,u=''){
   if(!Number.isFinite(v))return'—';
@@ -745,7 +744,7 @@ function frame(t){
 }
 document.querySelectorAll('.place').forEach(b=>{
   const type=b.dataset.type,key=Object.keys(componentShortcuts).find(k=>componentShortcuts[k]===type);
-  b.textContent=type+' ['+key+']';
+  b.textContent=names[type]+' ['+key+']';
   b.title=names[type]+' ('+key+')';
   b.setAttribute('aria-label',names[type]+' (shortcut '+key+')');
   b.setAttribute('aria-keyshortcuts',key);
