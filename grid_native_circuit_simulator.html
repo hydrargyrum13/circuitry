@@ -567,6 +567,9 @@ function valueSI(p){
   if(p.type==='C')return p.value*({'F':1,'mF':1e-3,'µF':1e-6,'nF':1e-9}[p.unit]||1);
   return p.value;
 }
+function diodeDrop(p){return Math.max(0,Number(p.value)||0)}
+function diodeIsForward(va,vk,drop){return va-vk>drop}
+function diodeCurrent(va,vk,drop){return diodeIsForward(va,vk,drop)?va-vk-drop:0}
 function solveLinear(A,b){
   const n=b.length,M=A.map((r,i)=>r.slice().concat([b[i]]));
   for(let i=0;i<n;i++){
@@ -659,9 +662,9 @@ function simulate(dt){
       }else if((p.type==='D'||p.type==='LED')){
         const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
         // Piecewise-linear constant-drop diode, with 1 ohm forward resistance.
-        const on=nV(a)-nV(b)>p.value;
+        const drop=diodeDrop(p),on=diodeIsForward(nV(a),nV(b),drop);
         addG(A,a,b,on?1:0);
-        if(on)addI(z,a,b,-p.value);
+        if(on)addI(z,a,b,-drop);
       }else if((p.type==='SW'||p.type==='SWLED')&&!p.closed){
         const a=nodeI(ts[0].x,ts[0].y),b=nodeI(ts[1].x,ts[1].y);
         addG(A,a,b,1e-12);
@@ -720,7 +723,7 @@ function simulate(dt){
       const k=vsrcs.indexOf(p),I=x[N+k]||0;p.i=I;p.termI.a=I;p.termI.b=-I;
     }else if((p.type==='D'||p.type==='LED')){
       const v=p.terminalV.a-p.terminalV.k;
-      const I=Math.max(0,v-p.value);
+      const I=diodeCurrent(p.terminalV.a,p.terminalV.k,diodeDrop(p));
       p.i=I;p.termI.a=I;p.termI.k=-I;
     }else if((p.type==='SW'||p.type==='SWLED')){
       p.i=0;p.termI.a=0;p.termI.b=0;
