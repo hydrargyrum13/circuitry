@@ -15,7 +15,6 @@
       if(!response.ok)throw new Error('HTTP '+response.status);
       let html=await response.text();
 
-      // Every lattice point touched by a wire is a real electrical junction.
       const oldNodeBlock=`  const nodeSet=new Set();
   for(const w of wires){nodeSet.add(w.a);nodeSet.add(w.b)}
   for(const p of parts)for(const t of terminals(p))nodeSet.add(nodeKey(t.x,t.y));
@@ -45,19 +44,18 @@
       if(!html.includes(oldWireUnion))throw new Error('Junction union patch target not found');
       html=html.replace(oldWireUnion,newWireUnion);
 
-      // Recover visible wire currents independently for each physical wire network.
-      // A GND symbol closes only the physical return network it is actually attached to.
       const flowPattern=/  \/\/ Recover ideal-wire and closed-switch currents using Kirchhoff's current law\.[\s\S]*?  simTime\+=dt;\n}/;
-      const flowReplacement=`  // Reconstruct physical wire currents from KCL on each visible wire component.
+      const flowReplacement=`  // Recover visible wire currents. Tree/path networks are solved exactly by KCL;
+  // only genuinely cyclic ideal-wire networks use the minimum-norm fallback.
   for(const w of wires){w.flowSegments=[];w.approxI=0}
   const flowEdges=[];
   for(const w of wires){
     const ks=wireLatticeKeys(w);
-    for(let i=1;i<ks.length;i++)flowEdges.push({a:ks[i-1],b:ks[i],wire:w,segmentIndex:i-1});
+    for(let i=1;i<ks.length;i++)flowEdges.push({a:ks[i-1],b:ks[i],wire:w,segmentIndex:i-1,I:0});
   }
   for(const p of parts.filter(p=>(p.type==='SW'||p.type==='SWLED')&&p.closed)){
     const ts=terminals(p);
-    flowEdges.push({a:nodeKey(ts[0].x,ts[0].y),b:nodeKey(ts[1].x,ts[1].y),part:p});
+    flowEdges.push({a:nodeKey(ts[0].x,ts[0].y),b:nodeKey(ts[1].x,ts[1].y),part:p,I:0});
   }
 
   const adjacency=new Map();
@@ -89,15 +87,10 @@
     }
     if(!localEdges.size)continue;
 
-    // Copy terminal injections for this physical wire component only.
     const localInjection=new Map(localNodes.map(k=>[k,terminalInjection.get(k)||0]));
     const localGrounds=[];
     for(const k of localNodes)for(const p of groundAt.get(k)||[])localGrounds.push({k,p});
     const imbalance=localNodes.reduce((sum,k)=>sum+(localInjection.get(k)||0),0);
-
-    // Ground is an ideal external return. If this visible component touches one or
-    // more ground symbols, they absorb exactly the KCL imbalance. Equal ground
-    // branches share it equally, which is the natural visualization for ideal wires.
     if(localGrounds.length){
       const share=-imbalance/localGrounds.length;
       for(const g of localGrounds){
@@ -106,20 +99,47 @@
       }
     }
 
-    // Solve the minimum-norm edge-current assignment satisfying KCL. Edge
-    // differences of this auxiliary potential are currents, not voltages.
-    const anchor=localNodes[0],free=localNodes.slice(1);
-    const fi=new Map(free.map((k,i)=>[k,i]));
-    const A=free.map(()=>Array(free.length).fill(0));
-    const z=free.map(k=>-(localInjection.get(k)||0));
-    for(const e of localEdges){
-      const a=fi.has(e.a)?fi.get(e.a):-1,b=fi.has(e.b)?fi.get(e.b):-1;
-      addG(A,a,b,1);
+    const edgeList=[...localEdges];
+    const isTree=edgeList.length===localNodes.length-1;
+    if(isTree){
+      // Root the physical wire tree anywhere. Subtree current is fixed exactly by KCL.
+      const root=localNodes[0],parent=new Map([[root,null]]),parentEdge=new Map(),order=[root];
+      for(let oi=0;oi<order.length;oi++){
+        const k=order[oi];
+        for(const e of adjacency.get(k)||[]){
+          if(!localEdges.has(e))continue;
+          const other=e.a===k?e.b:e.a;
+          if(parent.has(other))continue;
+          parent.set(other,k);parentEdge.set(other,e);order.push(other);
+        }
+      }
+      const subtotal=new Map(localNodes.map(k=>[k,localInjection.get(k)||0]));
+      for(let i=order.length-1;i>0;i--){
+        const child=order[i],par=parent.get(child),e=parentEdge.get(child);
+        const childNeed=subtotal.get(child)||0;
+        // Positive edge I is a->b. KCL convention uses terminal current positive into device,
+        // so wire current leaving the child node is +childNeed.
+        e.I=e.a===child?childNeed:-childNeed;
+        subtotal.set(par,(subtotal.get(par)||0)+childNeed);
+      }
+    }else{
+      // Cyclic zero-ohm wire networks have non-unique branch currents. Choose the
+      // minimum-energy assignment while still satisfying KCL at every node.
+      const anchor=localNodes[0],free=localNodes.slice(1);
+      const fi=new Map(free.map((k,i)=>[k,i]));
+      const A=free.map(()=>Array(free.length).fill(0));
+      const z=free.map(k=>-(localInjection.get(k)||0));
+      for(const e of localEdges){
+        const a=fi.has(e.a)?fi.get(e.a):-1,b=fi.has(e.b)?fi.get(e.b):-1;
+        addG(A,a,b,1);
+      }
+      const phi=solveLinear(A,z);
+      const potential=k=>k===anchor?0:(phi[fi.get(k)]||0);
+      for(const e of localEdges)e.I=potential(e.a)-potential(e.b);
     }
-    const phi=solveLinear(A,z);
-    const potential=k=>k===anchor?0:(phi[fi.get(k)]||0);
+
     for(const e of localEdges){
-      const I=potential(e.a)-potential(e.b);
+      const I=Number.isFinite(e.I)?e.I:0;
       if(e.wire){
         e.wire.flowSegments[e.segmentIndex]={a:e.a,b:e.b,I};
         if(e.segmentIndex===0)e.wire.approxI=I;
@@ -145,7 +165,6 @@
       if(!html.includes(oldDrawFlow))throw new Error('Wire electron-flow patch target not found');
       html=html.replace(oldDrawFlow,newDrawFlow);
 
-      // Autosave the workspace so refreshes do not destroy the circuit.
       const initBlock=`initChipLibrary();refreshInspector();updateStatus();requestAnimationFrame(frame);`;
       const autosaveBlock=`const CIRCUIT_STORAGE='circuitry.autosave.v1';
 function saveWorkspace(){
