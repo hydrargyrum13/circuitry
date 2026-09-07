@@ -45,79 +45,61 @@
       if(!html.includes(oldWireUnion))throw new Error('Junction union patch target not found');
       html=html.replace(oldWireUnion,newWireUnion);
 
-      // Replace the old ideal-wire reconstruction completely. Solve each visible
-      // wire component independently with KCL. Multiple GND symbols are explicit
-      // return points for visualization, so an underdetermined ideal-ground split
-      // is shared equally between the visible ground branches.
+      // Replace the old ideal-wire reconstruction completely. All visible ground
+      // symbols connect to one virtual ground node in the auxiliary flow network.
+      // This preserves KCL across separate return paths and naturally splits equal
+      // ideal branches instead of dropping their current to zero.
       const flowPattern=/  \/\/ Recover ideal-wire and closed-switch currents using Kirchhoff's current law\.[\s\S]*?  simTime\+=dt;\n}/;
-      const flowReplacement=`  // Reconstruct physical wire currents from terminal currents using KCL.
+      const flowReplacement=`  // Reconstruct visible wire currents with a dedicated KCL network.
   for(const w of wires){w.flowSegments=[];w.approxI=0}
   const flowEdges=[];
   for(const w of wires){
     const ks=wireLatticeKeys(w);
-    for(let i=1;i<ks.length;i++)flowEdges.push({a:ks[i-1],b:ks[i],wire:w,segmentIndex:i-1});
+    for(let i=1;i<ks.length;i++)flowEdges.push({a:ks[i-1],b:ks[i],wire:w,segmentIndex:i-1,g:1});
   }
   for(const p of parts.filter(p=>(p.type==='SW'||p.type==='SWLED')&&p.closed)){
     const ts=terminals(p);
-    flowEdges.push({a:nodeKey(ts[0].x,ts[0].y),b:nodeKey(ts[1].x,ts[1].y),part:p});
+    flowEdges.push({a:nodeKey(ts[0].x,ts[0].y),b:nodeKey(ts[1].x,ts[1].y),part:p,g:1});
   }
 
-  const adjacency=new Map();
-  function link(k,e){if(!adjacency.has(k))adjacency.set(k,[]);adjacency.get(k).push(e)}
-  for(const e of flowEdges){link(e.a,e);link(e.b,e)}
-
-  const injection=new Map(),groundTerms=[];
-  function addInjection(k,I){injection.set(k,(injection.get(k)||0)+(Number.isFinite(I)?I:0))}
+  const FLOW_GROUND='__circuitry_virtual_ground__';
+  const injection=new Map();
+  function addInjection(k,I){
+    if(Number.isFinite(I))injection.set(k,(injection.get(k)||0)+I);
+  }
   for(const p of parts)for(const t of terminals(p)){
     const k=nodeKey(t.x,t.y);
-    if(p.type==='GND')groundTerms.push({k,p});
-    else addInjection(k,p.termI[t.name]||0);
+    if(p.type==='GND'){
+      // Ground symbols are the same electrical node but remain separate drawn
+      // return paths. The virtual edge closes those paths for current recovery.
+      flowEdges.push({a:k,b:FLOW_GROUND,groundPart:p,g:1});
+    }else addInjection(k,p.termI[t.name]||0);
   }
 
-  const visited=new Set();
-  for(const start of adjacency.keys()){
-    if(visited.has(start))continue;
-    const stack=[start],componentNodes=[],componentEdges=new Set();
-    visited.add(start);
-    while(stack.length){
-      const k=stack.pop();componentNodes.push(k);
-      for(const e of adjacency.get(k)||[]){
-        componentEdges.add(e);
-        const other=e.a===k?e.b:e.a;
-        if(!visited.has(other)){visited.add(other);stack.push(other)}
-      }
-    }
-    if(componentNodes.length<2)continue;
-    const nodeSetLocal=new Set(componentNodes);
-    const grounds=groundTerms.filter(g=>nodeSetLocal.has(g.k));
-    let balance=componentNodes.reduce((sum,k)=>sum+(injection.get(k)||0),0);
-    if(grounds.length){
-      const share=-balance/grounds.length;
-      for(const g of grounds){addInjection(g.k,share);g.p.termI.g=share}
-      balance=0;
-    }
+  const flowNodes=new Set([FLOW_GROUND]);
+  for(const e of flowEdges){flowNodes.add(e.a);flowNodes.add(e.b)}
+  for(const k of injection.keys())flowNodes.add(k);
+  const freeNodes=[...flowNodes].filter(k=>k!==FLOW_GROUND);
+  const fi=new Map(freeNodes.map((k,i)=>[k,i]));
+  const A=freeNodes.map(()=>Array(freeNodes.length).fill(0));
+  const z=freeNodes.map(k=>-(injection.get(k)||0));
+  function stampFlowEdge(e){
+    const a=fi.has(e.a)?fi.get(e.a):-1,b=fi.has(e.b)?fi.get(e.b):-1,g=e.g||1;
+    addG(A,a,b,g);
+  }
+  for(const e of flowEdges)stampFlowEdge(e);
+  const phi=solveLinear(A,z);
+  const potential=k=>k===FLOW_GROUND?0:(phi[fi.get(k)]||0);
 
-    // One node is the arbitrary zero of this auxiliary flow-potential system.
-    // This is not an electrical voltage; edge differences are the minimum-energy
-    // current assignment satisfying KCL. Equal ideal paths therefore split evenly.
-    const anchor=componentNodes[0],freeNodes=componentNodes.slice(1);
-    const fi=new Map(freeNodes.map((k,i)=>[k,i]));
-    const A=freeNodes.map(()=>Array(freeNodes.length).fill(0));
-    const z=freeNodes.map(k=>-(injection.get(k)||0));
-    for(const e of componentEdges){
-      const a=fi.has(e.a)?fi.get(e.a):-1,b=fi.has(e.b)?fi.get(e.b):-1;
-      addG(A,a,b,1);
-    }
-    const phi=solveLinear(A,z);
-    const potential=k=>k===anchor?0:(phi[fi.get(k)]||0);
-    for(const e of componentEdges){
-      const I=potential(e.a)-potential(e.b);
-      if(e.wire){
-        e.wire.flowSegments[e.segmentIndex]={a:e.a,b:e.b,I};
-        if(e.segmentIndex===0)e.wire.approxI=I;
-      }else{
-        e.part.i=I;e.part.termI.a=I;e.part.termI.b=-I;
-      }
+  for(const e of flowEdges){
+    const I=(potential(e.a)-potential(e.b))*(e.g||1);
+    if(e.wire){
+      e.wire.flowSegments[e.segmentIndex]={a:e.a,b:e.b,I};
+      if(e.segmentIndex===0)e.wire.approxI=I;
+    }else if(e.part){
+      e.part.i=I;e.part.termI.a=I;e.part.termI.b=-I;
+    }else if(e.groundPart){
+      e.groundPart.termI.g=I;
     }
   }
 
