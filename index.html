@@ -15,8 +15,7 @@
       if(!response.ok)throw new Error('HTTP '+response.status);
       let html=await response.text();
 
-      // Make every grid lattice point touched by a wire a real electrical node.
-      // This fixes T-junctions, midpoint taps and grid-point wire crossings.
+      // Every lattice point touched by a wire is a real electrical junction.
       const oldNodeBlock=`  const nodeSet=new Set();
   for(const w of wires){nodeSet.add(w.a);nodeSet.add(w.b)}
   for(const p of parts)for(const t of terminals(p))nodeSet.add(nodeKey(t.x,t.y));
@@ -38,8 +37,7 @@
 
       const oldWireUnion=`  // Wires connect any two arbitrary grid nodes.
   for(const w of wires)dsu.u(idx.get(w.a),idx.get(w.b));`;
-      const newWireUnion=`  // A wire electrically connects every lattice point that lies on it.
-  // Therefore a terminal or another wire touching its midpoint becomes a real junction.
+      const newWireUnion=`  // Wires connect every lattice point on their drawn path.
   for(const w of wires){
     const ks=wireLatticeKeys(w);
     for(let i=1;i<ks.length;i++)dsu.u(idx.get(ks[i-1]),idx.get(ks[i]));
@@ -47,63 +45,99 @@
       if(!html.includes(oldWireUnion))throw new Error('Junction union patch target not found');
       html=html.replace(oldWireUnion,newWireUnion);
 
-      const oldEdges=`  const edges=wires.map(w=>({a:idx.get(w.a),b:idx.get(w.b),wire:w}));`;
-      const newEdges=`  const edges=[];
+      // Replace the old ideal-wire reconstruction completely. Solve each visible
+      // wire component independently with KCL. Multiple GND symbols are explicit
+      // return points for visualization, so an underdetermined ideal-ground split
+      // is shared equally between the visible ground branches.
+      const flowPattern=/  \/\/ Recover ideal-wire and closed-switch currents using Kirchhoff's current law\.[\s\S]*?  simTime\+=dt;\n}/;
+      const flowReplacement=`  // Reconstruct physical wire currents from terminal currents using KCL.
+  for(const w of wires){w.flowSegments=[];w.approxI=0}
+  const flowEdges=[];
   for(const w of wires){
-    const ks=wireLatticeKeys(w);w.flowSegments=[];
-    for(let i=1;i<ks.length;i++)edges.push({a:idx.get(ks[i-1]),b:idx.get(ks[i]),wire:w,ka:ks[i-1],kb:ks[i],segmentIndex:i-1});
-  }`;
-      if(!html.includes(oldEdges))throw new Error('Wire segment patch target not found');
-      html=html.replace(oldEdges,newEdges);
+    const ks=wireLatticeKeys(w);
+    for(let i=1;i<ks.length;i++)flowEdges.push({a:ks[i-1],b:ks[i],wire:w,segmentIndex:i-1});
+  }
+  for(const p of parts.filter(p=>(p.type==='SW'||p.type==='SWLED')&&p.closed)){
+    const ts=terminals(p);
+    flowEdges.push({a:nodeKey(ts[0].x,ts[0].y),b:nodeKey(ts[1].x,ts[1].y),part:p});
+  }
 
-      const oldEdgeResult=`    if(edge.wire)edge.wire.approxI=I;
-    else {edge.part.i=I;edge.part.termI.a=I;edge.part.termI.b=-I}`;
-      const newEdgeResult=`    if(edge.wire){
-      edge.wire.flowSegments[edge.segmentIndex]={a:edge.ka,b:edge.kb,I};
-      if(edge.segmentIndex===0)edge.wire.approxI=I;
-    }else {edge.part.i=I;edge.part.termI.a=I;edge.part.termI.b=-I}`;
-      if(!html.includes(oldEdgeResult))throw new Error('Wire flow result patch target not found');
-      html=html.replace(oldEdgeResult,newEdgeResult);
+  const adjacency=new Map();
+  function link(k,e){if(!adjacency.has(k))adjacency.set(k,[]);adjacency.get(k).push(e)}
+  for(const e of flowEdges){link(e.a,e);link(e.b,e)}
+
+  const injection=new Map(),groundTerms=[];
+  function addInjection(k,I){injection.set(k,(injection.get(k)||0)+(Number.isFinite(I)?I:0))}
+  for(const p of parts)for(const t of terminals(p)){
+    const k=nodeKey(t.x,t.y);
+    if(p.type==='GND')groundTerms.push({k,p});
+    else addInjection(k,p.termI[t.name]||0);
+  }
+
+  const visited=new Set();
+  for(const start of adjacency.keys()){
+    if(visited.has(start))continue;
+    const stack=[start],componentNodes=[],componentEdges=new Set();
+    visited.add(start);
+    while(stack.length){
+      const k=stack.pop();componentNodes.push(k);
+      for(const e of adjacency.get(k)||[]){
+        componentEdges.add(e);
+        const other=e.a===k?e.b:e.a;
+        if(!visited.has(other)){visited.add(other);stack.push(other)}
+      }
+    }
+    if(componentNodes.length<2)continue;
+    const nodeSetLocal=new Set(componentNodes);
+    const grounds=groundTerms.filter(g=>nodeSetLocal.has(g.k));
+    let balance=componentNodes.reduce((sum,k)=>sum+(injection.get(k)||0),0);
+    if(grounds.length){
+      const share=-balance/grounds.length;
+      for(const g of grounds){addInjection(g.k,share);g.p.termI.g=share}
+      balance=0;
+    }
+
+    // One node is the arbitrary zero of this auxiliary flow-potential system.
+    // This is not an electrical voltage; edge differences are the minimum-energy
+    // current assignment satisfying KCL. Equal ideal paths therefore split evenly.
+    const anchor=componentNodes[0],freeNodes=componentNodes.slice(1);
+    const fi=new Map(freeNodes.map((k,i)=>[k,i]));
+    const A=freeNodes.map(()=>Array(freeNodes.length).fill(0));
+    const z=freeNodes.map(k=>-(injection.get(k)||0));
+    for(const e of componentEdges){
+      const a=fi.has(e.a)?fi.get(e.a):-1,b=fi.has(e.b)?fi.get(e.b):-1;
+      addG(A,a,b,1);
+    }
+    const phi=solveLinear(A,z);
+    const potential=k=>k===anchor?0:(phi[fi.get(k)]||0);
+    for(const e of componentEdges){
+      const I=potential(e.a)-potential(e.b);
+      if(e.wire){
+        e.wire.flowSegments[e.segmentIndex]={a:e.a,b:e.b,I};
+        if(e.segmentIndex===0)e.wire.approxI=I;
+      }else{
+        e.part.i=I;e.part.termI.a=I;e.part.termI.b=-I;
+      }
+    }
+  }
+
+  simTime+=dt;
+}`;
+      if(!flowPattern.test(html))throw new Error('Current reconstruction patch target not found');
+      html=html.replace(flowPattern,flowReplacement);
 
       const oldDrawFlow=`function drawElectronFlow(w){
   drawElectronFlowSegment(nodeXY(w.a),nodeXY(w.b),w.approxI||0);
 }`;
       const newDrawFlow=`function drawElectronFlow(w){
   if(Array.isArray(w.flowSegments)&&w.flowSegments.length){
-    for(const s of w.flowSegments)drawElectronFlowSegment(nodeXY(s.a),nodeXY(s.b),s.I||0);
+    for(const s of w.flowSegments)if(s)drawElectronFlowSegment(nodeXY(s.a),nodeXY(s.b),s.I||0);
   }else drawElectronFlowSegment(nodeXY(w.a),nodeXY(w.b),w.approxI||0);
 }`;
       if(!html.includes(oldDrawFlow))throw new Error('Wire electron-flow patch target not found');
       html=html.replace(oldDrawFlow,newDrawFlow);
 
-      // Ground symbols are explicit physical return points for the visual current solver.
-      const oldGroundBlock=`  for(const p of parts)for(const t of terminals(p)){
-    injection[idx.get(nodeKey(t.x,t.y))]+=p.termI[t.name]||0;
-  }`;
-      const newGroundBlock=`  const groundFlowTerms=[];
-  for(const p of parts)for(const t of terminals(p)){
-    const n=idx.get(nodeKey(t.x,t.y));if(n==null)continue;
-    if(p.type==='GND')groundFlowTerms.push({p,node:n});
-    else injection[n]+=p.termI[t.name]||0;
-  }
-  const flowBalance=new Map();
-  for(let i=0;i<nodes.length;i++){
-    const root=flowDSU.f(i);
-    flowBalance.set(root,(flowBalance.get(root)||0)+injection[i]);
-  }
-  const groundsByFlow=new Map();
-  for(const g of groundFlowTerms){
-    const root=flowDSU.f(g.node);
-    if(!groundsByFlow.has(root))groundsByFlow.set(root,[]);
-    groundsByFlow.get(root).push(g);
-  }
-  for(const [root,gs] of groundsByFlow){
-    const share=-(flowBalance.get(root)||0)/gs.length;
-    for(const g of gs){injection[g.node]+=share;g.p.termI.g=share}
-  }`;
-      if(!html.includes(oldGroundBlock))throw new Error('Ground-flow patch target not found');
-      html=html.replace(oldGroundBlock,newGroundBlock);
-
+      // Autosave the workspace so refreshes do not destroy the circuit.
       const initBlock=`initChipLibrary();refreshInspector();updateStatus();requestAnimationFrame(frame);`;
       const autosaveBlock=`const CIRCUIT_STORAGE='circuitry.autosave.v1';
 function saveWorkspace(){
