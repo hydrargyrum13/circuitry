@@ -4,12 +4,54 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Grid Circuit Simulator</title>
-  <meta http-equiv="refresh" content="0; url=./grid_native_circuit_simulator.html">
-  <script>
-    window.location.replace('./grid_native_circuit_simulator.html');
-  </script>
 </head>
-<body>
-  <p>Opening Circuitry… <a href="./grid_native_circuit_simulator.html">Continue</a></p>
+<body style="margin:0;background:#0b0f14;color:#e7f0f7;font-family:Arial,sans-serif">
+  <p id="loading" style="padding:16px">Opening Circuitry…</p>
+  <script>
+  (async()=>{
+    const loading=document.getElementById('loading');
+    try{
+      const response=await fetch('./grid_native_circuit_simulator.html',{cache:'no-store'});
+      if(!response.ok)throw new Error('HTTP '+response.status);
+      let html=await response.text();
+      const oldBlock=`  for(const p of parts)for(const t of terminals(p)){
+    injection[idx.get(nodeKey(t.x,t.y))]+=p.termI[t.name]||0;
+  }`;
+      const newBlock=`  const groundFlowTerms=[];
+  for(const p of parts)for(const t of terminals(p)){
+    const n=idx.get(nodeKey(t.x,t.y));if(n==null)continue;
+    if(p.type==='GND')groundFlowTerms.push({p,node:n});
+    else injection[n]+=p.termI[t.name]||0;
+  }
+  // Ground symbols are physical return points. The electrical solver merges all
+  // grounds into one ideal node, so the split between visible ground branches is
+  // underdetermined. Balance each visible wire component locally and distribute
+  // its return current evenly between the ground symbols attached to it.
+  const flowBalance=new Map();
+  for(let i=0;i<nodes.length;i++){
+    const root=flowDSU.f(i);
+    flowBalance.set(root,(flowBalance.get(root)||0)+injection[i]);
+  }
+  const groundsByFlow=new Map();
+  for(const g of groundFlowTerms){
+    const root=flowDSU.f(g.node);
+    if(!groundsByFlow.has(root))groundsByFlow.set(root,[]);
+    groundsByFlow.get(root).push(g);
+  }
+  for(const [root,gs] of groundsByFlow){
+    const share=-(flowBalance.get(root)||0)/gs.length;
+    for(const g of gs){injection[g.node]+=share;g.p.termI.g=share}
+  }`;
+      if(!html.includes(oldBlock))throw new Error('Simulator patch target not found');
+      html=html.replace(oldBlock,newBlock);
+      document.open();
+      document.write(html);
+      document.close();
+    }catch(err){
+      loading.textContent='Circuitry failed to load: '+err.message;
+      console.error(err);
+    }
+  })();
+  </script>
 </body>
 </html>
