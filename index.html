@@ -14,19 +14,78 @@
       const response=await fetch('./grid_native_circuit_simulator.html',{cache:'no-store'});
       if(!response.ok)throw new Error('HTTP '+response.status);
       let html=await response.text();
-      const oldBlock=`  for(const p of parts)for(const t of terminals(p)){
+
+      // Make every grid lattice point touched by a wire a real electrical node.
+      // This fixes T-junctions, midpoint taps and grid-point wire crossings.
+      const oldNodeBlock=`  const nodeSet=new Set();
+  for(const w of wires){nodeSet.add(w.a);nodeSet.add(w.b)}
+  for(const p of parts)for(const t of terminals(p))nodeSet.add(nodeKey(t.x,t.y));
+  const nodes=[...nodeSet];`;
+      const newNodeBlock=`  function wireLatticeKeys(w){
+    const [ax,ay]=w.a.split(',').map(Number),[bx,by]=w.b.split(',').map(Number);
+    const dx=bx-ax,dy=by-ay;
+    const gcd=(a,b)=>{a=Math.abs(a);b=Math.abs(b);while(b)[a,b]=[b,a%b];return a||1};
+    const steps=gcd(dx,dy),keys=[];
+    for(let i=0;i<=steps;i++)keys.push((ax+dx*i/steps)+','+(ay+dy*i/steps));
+    return keys;
+  }
+  const nodeSet=new Set();
+  for(const w of wires)for(const k of wireLatticeKeys(w))nodeSet.add(k);
+  for(const p of parts)for(const t of terminals(p))nodeSet.add(nodeKey(t.x,t.y));
+  const nodes=[...nodeSet];`;
+      if(!html.includes(oldNodeBlock))throw new Error('Junction node patch target not found');
+      html=html.replace(oldNodeBlock,newNodeBlock);
+
+      const oldWireUnion=`  // Wires connect any two arbitrary grid nodes.
+  for(const w of wires)dsu.u(idx.get(w.a),idx.get(w.b));`;
+      const newWireUnion=`  // A wire electrically connects every lattice point that lies on it.
+  // Therefore a terminal or another wire touching its midpoint becomes a real junction.
+  for(const w of wires){
+    const ks=wireLatticeKeys(w);
+    for(let i=1;i<ks.length;i++)dsu.u(idx.get(ks[i-1]),idx.get(ks[i]));
+  }`;
+      if(!html.includes(oldWireUnion))throw new Error('Junction union patch target not found');
+      html=html.replace(oldWireUnion,newWireUnion);
+
+      const oldEdges=`  const edges=wires.map(w=>({a:idx.get(w.a),b:idx.get(w.b),wire:w}));`;
+      const newEdges=`  const edges=[];
+  for(const w of wires){
+    const ks=wireLatticeKeys(w);w.flowSegments=[];
+    for(let i=1;i<ks.length;i++)edges.push({a:idx.get(ks[i-1]),b:idx.get(ks[i]),wire:w,ka:ks[i-1],kb:ks[i],segmentIndex:i-1});
+  }`;
+      if(!html.includes(oldEdges))throw new Error('Wire segment patch target not found');
+      html=html.replace(oldEdges,newEdges);
+
+      const oldEdgeResult=`    if(edge.wire)edge.wire.approxI=I;
+    else {edge.part.i=I;edge.part.termI.a=I;edge.part.termI.b=-I}`;
+      const newEdgeResult=`    if(edge.wire){
+      edge.wire.flowSegments[edge.segmentIndex]={a:edge.ka,b:edge.kb,I};
+      if(edge.segmentIndex===0)edge.wire.approxI=I;
+    }else {edge.part.i=I;edge.part.termI.a=I;edge.part.termI.b=-I}`;
+      if(!html.includes(oldEdgeResult))throw new Error('Wire flow result patch target not found');
+      html=html.replace(oldEdgeResult,newEdgeResult);
+
+      const oldDrawFlow=`function drawElectronFlow(w){
+  drawElectronFlowSegment(nodeXY(w.a),nodeXY(w.b),w.approxI||0);
+}`;
+      const newDrawFlow=`function drawElectronFlow(w){
+  if(Array.isArray(w.flowSegments)&&w.flowSegments.length){
+    for(const s of w.flowSegments)drawElectronFlowSegment(nodeXY(s.a),nodeXY(s.b),s.I||0);
+  }else drawElectronFlowSegment(nodeXY(w.a),nodeXY(w.b),w.approxI||0);
+}`;
+      if(!html.includes(oldDrawFlow))throw new Error('Wire electron-flow patch target not found');
+      html=html.replace(oldDrawFlow,newDrawFlow);
+
+      // Ground symbols are explicit physical return points for the visual current solver.
+      const oldGroundBlock=`  for(const p of parts)for(const t of terminals(p)){
     injection[idx.get(nodeKey(t.x,t.y))]+=p.termI[t.name]||0;
   }`;
-      const newBlock=`  const groundFlowTerms=[];
+      const newGroundBlock=`  const groundFlowTerms=[];
   for(const p of parts)for(const t of terminals(p)){
     const n=idx.get(nodeKey(t.x,t.y));if(n==null)continue;
     if(p.type==='GND')groundFlowTerms.push({p,node:n});
     else injection[n]+=p.termI[t.name]||0;
   }
-  // Ground symbols are physical return points. The electrical solver merges all
-  // grounds into one ideal node, so the split between visible ground branches is
-  // underdetermined. Balance each visible wire component locally and distribute
-  // its return current evenly between the ground symbols attached to it.
   const flowBalance=new Map();
   for(let i=0;i<nodes.length;i++){
     const root=flowDSU.f(i);
@@ -42,8 +101,8 @@
     const share=-(flowBalance.get(root)||0)/gs.length;
     for(const g of gs){injection[g.node]+=share;g.p.termI.g=share}
   }`;
-      if(!html.includes(oldBlock))throw new Error('Simulator patch target not found');
-      html=html.replace(oldBlock,newBlock);
+      if(!html.includes(oldGroundBlock))throw new Error('Ground-flow patch target not found');
+      html=html.replace(oldGroundBlock,newGroundBlock);
 
       const initBlock=`initChipLibrary();refreshInspector();updateStatus();requestAnimationFrame(frame);`;
       const autosaveBlock=`const CIRCUIT_STORAGE='circuitry.autosave.v1';
