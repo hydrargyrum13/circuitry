@@ -44,6 +44,67 @@
   }`;
       if(!html.includes(oldBlock))throw new Error('Simulator patch target not found');
       html=html.replace(oldBlock,newBlock);
+
+      const initBlock=`initChipLibrary();refreshInspector();updateStatus();requestAnimationFrame(frame);`;
+      const autosaveBlock=`const CIRCUIT_STORAGE='circuitry.autosave.v1';
+function saveWorkspace(){
+  try{
+    const cleanParts=parts.map(p=>{
+      const q={id:p.id,type:p.type,x:p.x,y:p.y,rot:p.rot,capV:Number.isFinite(p.capV)?p.capV:0};
+      if(p.chipId!=null)q.chipId=p.chipId;
+      for(const k of Object.keys(defaults[p.type]||{}))q[k]=p[k];
+      return q;
+    });
+    const cleanWires=wires.map(w=>({id:w.id,a:w.a,b:w.b,...(w.chipId!=null?{chipId:w.chipId}:{})}));
+    const state={version:1,parts:cleanParts,wires:cleanWires,chipGroups:chipGroups.map(g=>({...g})),nextId,
+      view:{scale:viewScale,x:viewX,y:viewY},dt:Number(document.getElementById('dtInput').value)||.001,
+      running,showElectrons,simTime};
+    localStorage.setItem(CIRCUIT_STORAGE,JSON.stringify(state));
+  }catch(err){console.warn('Circuit autosave failed',err)}
+}
+function restoreWorkspace(){
+  try{
+    const state=JSON.parse(localStorage.getItem(CIRCUIT_STORAGE)||'null');
+    if(!state||state.version!==1||!Array.isArray(state.parts)||!Array.isArray(state.wires))return;
+    const validCoord=n=>Number.isFinite(n)&&Math.abs(n)<1e8&&n%GRID===0;
+    const restoredParts=[];
+    for(const s of state.parts){
+      if(!s||!Object.hasOwn(defaults,s.type)||!Number.isInteger(s.id)||!validCoord(s.x)||!validCoord(s.y)||!Number.isInteger(s.rot))continue;
+      const p={id:s.id,type:s.type,x:s.x,y:s.y,rot:((s.rot%4)+4)%4,...clone(defaults[s.type]),terminalV:{},termI:{},i:0,capV:Number.isFinite(s.capV)?s.capV:0};
+      for(const k of Object.keys(defaults[s.type]))if(typeof s[k]===typeof defaults[s.type][k]&&(typeof s[k]!=='number'||Number.isFinite(s[k])))p[k]=s[k];
+      if(Number.isInteger(s.chipId))p.chipId=s.chipId;
+      restoredParts.push(p);
+    }
+    const restoredWires=[];
+    for(const s of state.wires){
+      if(!s||!Number.isInteger(s.id)||typeof s.a!=='string'||typeof s.b!=='string'||!/^[-]?\\d+,[-]?\\d+$/.test(s.a)||!/^[-]?\\d+,[-]?\\d+$/.test(s.b))continue;
+      const w={id:s.id,a:s.a,b:s.b,approxI:0};if(Number.isInteger(s.chipId))w.chipId=s.chipId;restoredWires.push(w);
+    }
+    parts.splice(0,parts.length,...restoredParts);wires.splice(0,wires.length,...restoredWires);
+    chipGroups.splice(0,chipGroups.length,...(Array.isArray(state.chipGroups)?state.chipGroups.filter(g=>g&&Number.isInteger(g.id)&&typeof g.name==='string'&&typeof g.color==='string').map(g=>({...g})):[]));
+    selection.clear();selected=null;wireStart=null;
+    const ids=[...parts,...wires,...chipGroups].map(o=>o.id).filter(Number.isInteger);
+    nextId=Math.max(Number.isInteger(state.nextId)?state.nextId:1,ids.length?Math.max(...ids)+1:1);
+    if(state.view&&Number.isFinite(state.view.scale)&&Number.isFinite(state.view.x)&&Number.isFinite(state.view.y)){
+      viewScale=Math.max(.25,Math.min(4,state.view.scale));viewX=state.view.x;viewY=state.view.y;
+    }
+    if(Number.isFinite(state.dt)&&state.dt>0)document.getElementById('dtInput').value=state.dt;
+    if(typeof state.running==='boolean')running=state.running;
+    if(typeof state.showElectrons==='boolean')showElectrons=state.showElectrons;
+    if(Number.isFinite(state.simTime))simTime=state.simTime;
+    document.getElementById('runBtn').classList.toggle('active',running);
+    document.getElementById('runBtn').textContent=running?'Run':'Paused';
+    document.getElementById('electronBtn').classList.toggle('active',showElectrons);
+  }catch(err){console.warn('Circuit restore failed',err)}
+}
+restoreWorkspace();
+setInterval(saveWorkspace,500);
+addEventListener('beforeunload',saveWorkspace);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')saveWorkspace()});
+initChipLibrary();refreshInspector();updateStatus();requestAnimationFrame(frame);`;
+      if(!html.includes(initBlock))throw new Error('Autosave patch target not found');
+      html=html.replace(initBlock,autosaveBlock);
+
       document.open();
       document.write(html);
       document.close();
