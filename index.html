@@ -167,8 +167,14 @@
 
       const initBlock=`initChipLibrary();refreshInspector();updateStatus();requestAnimationFrame(frame);`;
       const autosaveBlock=`const CIRCUIT_STORAGE='circuitry.autosave.v1';
+const WORKSPACE_LIMITS={parts:5000,wires:10000,groups:1000,bytes:4000000};
+let lastWorkspaceJson='';
 function saveWorkspace(){
   try{
+    if(parts.length>WORKSPACE_LIMITS.parts||wires.length>WORKSPACE_LIMITS.wires||chipGroups.length>WORKSPACE_LIMITS.groups){
+      hud.textContent='Autosave paused: workspace is above the safe size limit.';
+      return;
+    }
     const cleanParts=parts.map(p=>{
       const q={id:p.id,type:p.type,x:p.x,y:p.y,rot:p.rot,capV:Number.isFinite(p.capV)?p.capV:0};
       if(p.chipId!=null)q.chipId=p.chipId;
@@ -179,14 +185,26 @@ function saveWorkspace(){
     const state={version:1,parts:cleanParts,wires:cleanWires,chipGroups:chipGroups.map(g=>({...g})),nextId,
       view:{scale:viewScale,x:viewX,y:viewY},dt:Number(document.getElementById('dtInput').value)||.001,
       running,showElectrons,simTime};
-    localStorage.setItem(CIRCUIT_STORAGE,JSON.stringify(state));
+    const encoded=JSON.stringify(state);
+    if(encoded.length>WORKSPACE_LIMITS.bytes){hud.textContent='Autosave paused: workspace data is too large.';return}
+    if(encoded===lastWorkspaceJson)return;
+    localStorage.setItem(CIRCUIT_STORAGE,encoded);
+    lastWorkspaceJson=encoded;
   }catch(err){console.warn('Circuit autosave failed',err)}
 }
 function restoreWorkspace(){
   try{
-    const state=JSON.parse(localStorage.getItem(CIRCUIT_STORAGE)||'null');
+    const raw=localStorage.getItem(CIRCUIT_STORAGE);
+    if(!raw||raw.length>WORKSPACE_LIMITS.bytes)return;
+    const state=JSON.parse(raw);
     if(!state||state.version!==1||!Array.isArray(state.parts)||!Array.isArray(state.wires))return;
+    if(state.parts.length>WORKSPACE_LIMITS.parts||state.wires.length>WORKSPACE_LIMITS.wires||
+      (Array.isArray(state.chipGroups)&&state.chipGroups.length>WORKSPACE_LIMITS.groups))return;
     const validCoord=n=>Number.isFinite(n)&&Math.abs(n)<1e8&&n%GRID===0;
+    const validNode=s=>{
+      if(typeof s!=='string'||!/^[-]?\\d+,[-]?\\d+$/.test(s))return false;
+      const [x,y]=s.split(',').map(Number);return validCoord(x*GRID)&&validCoord(y*GRID);
+    };
     const restoredParts=[];
     for(const s of state.parts){
       if(!s||!Object.hasOwn(defaults,s.type)||!Number.isInteger(s.id)||!validCoord(s.x)||!validCoord(s.y)||!Number.isInteger(s.rot))continue;
@@ -197,28 +215,29 @@ function restoreWorkspace(){
     }
     const restoredWires=[];
     for(const s of state.wires){
-      if(!s||!Number.isInteger(s.id)||typeof s.a!=='string'||typeof s.b!=='string'||!/^[-]?\\d+,[-]?\\d+$/.test(s.a)||!/^[-]?\\d+,[-]?\\d+$/.test(s.b))continue;
+      if(!s||!Number.isInteger(s.id)||!validNode(s.a)||!validNode(s.b)||s.a===s.b)continue;
       const w={id:s.id,a:s.a,b:s.b,approxI:0};if(Number.isInteger(s.chipId))w.chipId=s.chipId;restoredWires.push(w);
     }
     parts.splice(0,parts.length,...restoredParts);wires.splice(0,wires.length,...restoredWires);
-    chipGroups.splice(0,chipGroups.length,...(Array.isArray(state.chipGroups)?state.chipGroups.filter(g=>g&&Number.isInteger(g.id)&&typeof g.name==='string'&&typeof g.color==='string').map(g=>({...g})):[]));
+    chipGroups.splice(0,chipGroups.length,...(Array.isArray(state.chipGroups)?state.chipGroups.filter(g=>g&&Number.isInteger(g.id)&&typeof g.name==='string'&&g.name.length<=48&&/^#[0-9a-f]{6}$/i.test(g.color)).map(g=>({...g})):[]));
     selection.clear();selected=null;wireStart=null;
     const ids=[...parts,...wires,...chipGroups].map(o=>o.id).filter(Number.isInteger);
     nextId=Math.max(Number.isInteger(state.nextId)?state.nextId:1,ids.length?Math.max(...ids)+1:1);
-    if(state.view&&Number.isFinite(state.view.scale)&&Number.isFinite(state.view.x)&&Number.isFinite(state.view.y)){
+    if(state.view&&Number.isFinite(state.view.scale)&&Number.isFinite(state.view.x)&&Number.isFinite(state.view.y)&&Math.abs(state.view.x)<1e8&&Math.abs(state.view.y)<1e8){
       viewScale=Math.max(.25,Math.min(4,state.view.scale));viewX=state.view.x;viewY=state.view.y;
     }
-    if(Number.isFinite(state.dt)&&state.dt>0)document.getElementById('dtInput').value=state.dt;
+    if(Number.isFinite(state.dt)&&state.dt>0&&state.dt<=1)document.getElementById('dtInput').value=state.dt;
     if(typeof state.running==='boolean')running=state.running;
     if(typeof state.showElectrons==='boolean')showElectrons=state.showElectrons;
-    if(Number.isFinite(state.simTime))simTime=state.simTime;
+    if(Number.isFinite(state.simTime)&&state.simTime>=0)simTime=state.simTime;
     document.getElementById('runBtn').classList.toggle('active',running);
     document.getElementById('runBtn').textContent=running?'Run':'Paused';
     document.getElementById('electronBtn').classList.toggle('active',showElectrons);
+    lastWorkspaceJson=raw;
   }catch(err){console.warn('Circuit restore failed',err)}
 }
 restoreWorkspace();
-setInterval(saveWorkspace,500);
+setInterval(saveWorkspace,3000);
 addEventListener('beforeunload',saveWorkspace);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')saveWorkspace()});
 initChipLibrary();refreshInspector();updateStatus();requestAnimationFrame(frame);`;
